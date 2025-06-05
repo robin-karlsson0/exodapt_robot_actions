@@ -1,0 +1,9 @@
+catkin-pkg
+lark
+empy
+wheel
+pyyaml
+numpy
+pytest
+transformers
+ros2_ws/src/exodapt_robot_pt
