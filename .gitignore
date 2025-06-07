@@ -196,6 +196,8 @@ cython_debug/
 ros2_ws/src/exodapt_robot_interfaces/
 
 .vscode
+.python-version
+
 ros2_ws/install
 ros2_ws/build
 ros2_ws/log
