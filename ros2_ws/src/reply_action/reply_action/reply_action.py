@@ -63,7 +63,17 @@ class ReplyActionServer(Node):
         """
         super().__init__('reply_action', **kwargs)
 
-        self.action_server_name = 'reply_action_server'
+        self.declare_parameter('action_server_name', 'reply_action_server')
+        self.declare_parameter('tgi_server_url', 'http://localhost:5000')
+        self.declare_parameter('max_tokens', 1024)
+        self.declare_parameter('llm_temp', 0.6)
+        self.declare_parameter('llm_seed', 14)
+        self.action_server_name = self.get_parameter(
+            'action_server_name').value
+        self.tgi_server_url = self.get_parameter('tgi_server_url').value
+        self.max_tokens = self.get_parameter('max_tokens').value
+        self.llm_temp = self.get_parameter('llm_temp').value
+        self.llm_seed = self.get_parameter('llm_seed').value
 
         self._action_server = ActionServer(
             self,
@@ -71,26 +81,18 @@ class ReplyActionServer(Node):
             self.action_server_name,
             execute_callback=self.execute_callback_tgi,
         )
-
-        self.declare_parameter('tgi_server_url', 'http://localhost:5000')
-        self.declare_parameter('max_tokens', 1024)
-        self.declare_parameter('llm_temp', 0.6)
-        self.declare_parameter('llm_seed', 14)
-        self.tgi_server_url = self.get_parameter('tgi_server_url').value
-        self.max_tokens = self.get_parameter('max_tokens').value
-        self.llm_temp = self.get_parameter('llm_temp').value
-        self.llm_seed = self.get_parameter('llm_seed').value
-
         # TGI inference client
         base_url = f"{self.tgi_server_url}/v1/"
         self.client = InferenceClient(base_url=base_url)
 
-        self.get_logger().info('ReplyActionServer initialized\n'
-                               'Parameters:\n'
-                               f'  TGI server url: {self.tgi_server_url}\n'
-                               f'  max_tokens={self.max_tokens}\n'
-                               f'  llm_temp={self.llm_temp}\n'
-                               f'  llm_seed={self.llm_seed}')
+        self.get_logger().info(
+            'ReplyActionServer initialized\n'
+            'Parameters:\n'
+            f'  action_server_name: {self.action_server_name}\n'
+            f'  TGI server url: {self.tgi_server_url}\n'
+            f'  max_tokens={self.max_tokens}\n'
+            f'  llm_temp={self.llm_temp}\n'
+            f'  llm_seed={self.llm_seed}')
 
     async def execute_callback_tgi(self, goal_handle):
         """
