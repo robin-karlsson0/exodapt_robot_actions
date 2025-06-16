@@ -7,6 +7,7 @@ from exodapt_robot_pt import reply_action_pt
 from huggingface_hub import InferenceClient
 from rclpy.action import ActionServer
 from rclpy.node import Node
+from std_msgs.msg import String
 
 
 class ReplyActionServer(Node):
@@ -24,6 +25,8 @@ class ReplyActionServer(Node):
     appropriate responses for human-robot interaction scenarios.
 
     Parameters:
+        action_server_name (str): Name of the action server (default: 'reply_action_server')
+        reply_action_topic (str): Topic for publishing ReplyAction results (default: '/reply_action')
         tgi_server_url (str): URL of the TGI inference server (default: 'http://localhost:5000')
         max_tokens (int): Maximum number of tokens to generate (default: 1024)
         llm_temp (float): Temperature parameter for response generation (default: 0.6)
@@ -37,6 +40,7 @@ class ReplyActionServer(Node):
 
     Attributes:
         action_server_name (str): Name of the action server
+        reply_action_topic (str): Topic for publishing ReplyAction results
         client (InferenceClient): Huggingface TGI inference client
         tgi_server_url (str): Configured TGI server URL
         max_tokens (int): Maximum tokens for generation
@@ -64,12 +68,15 @@ class ReplyActionServer(Node):
         super().__init__('reply_action', **kwargs)
 
         self.declare_parameter('action_server_name', 'reply_action_server')
+        self.declare_parameter('reply_action_topic', '/reply_action')
         self.declare_parameter('tgi_server_url', 'http://localhost:5000')
         self.declare_parameter('max_tokens', 1024)
         self.declare_parameter('llm_temp', 0.6)
         self.declare_parameter('llm_seed', 14)
         self.action_server_name = self.get_parameter(
             'action_server_name').value
+        self.reply_action_topic = self.get_parameter(
+            'reply_action_topic').value
         self.tgi_server_url = self.get_parameter('tgi_server_url').value
         self.max_tokens = self.get_parameter('max_tokens').value
         self.llm_temp = self.get_parameter('llm_temp').value
@@ -81,6 +88,13 @@ class ReplyActionServer(Node):
             self.action_server_name,
             execute_callback=self.execute_callback_tgi,
         )
+
+        self._reply_action_pub = self.create_publisher(
+            String,
+            self.reply_action_topic,
+            10,
+        )
+
         # TGI inference client
         base_url = f"{self.tgi_server_url}/v1/"
         self.client = InferenceClient(base_url=base_url)
@@ -89,6 +103,7 @@ class ReplyActionServer(Node):
             'ReplyActionServer initialized\n'
             'Parameters:\n'
             f'  action_server_name: {self.action_server_name}\n'
+            f'  reply_action_topic: {self.reply_action_topic}\n'
             f'  TGI server url: {self.tgi_server_url}\n'
             f'  max_tokens={self.max_tokens}\n'
             f'  llm_temp={self.llm_temp}\n'
@@ -181,6 +196,12 @@ class ReplyActionServer(Node):
 
         result_msg = ReplyAction.Result()
         result_msg.reply = resp
+
+        # Publish result
+        result_msg_str = String()
+        result_msg_str.data = resp
+        self._reply_action_pub.publish(result_msg_str)
+
         return result_msg
 
 

@@ -9,8 +9,10 @@ from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from reply_action.reply_action import ReplyActionServer
+from std_msgs.msg import String
 
 REPLY_ACTION_SERVER_NAME = 'reply_action_server'
+REPLY_ACTION_TOPIC = '/reply_action'
 
 
 class TestReplyActionServer:
@@ -212,6 +214,15 @@ class TestReplyActionServer:
             REPLY_ACTION_SERVER_NAME,
         )
 
+        # Create subscriber to capture published result
+        published_result = []
+
+        def result_callback(msg):
+            published_result.append(msg.data)
+
+        result_subscriber = client_node.create_subscription(
+            String, REPLY_ACTION_TOPIC, result_callback, 10)
+
         try:
             # Wait for the action server to be available
             assert reply_action_client.wait_for_server(timeout_sec=10), \
@@ -266,6 +277,18 @@ class TestReplyActionServer:
             assert len(reply) > 0, "reply should not be empty"
 
             print(f'Received reply: "{reply}"')
+
+            # Allow some time for the publication to reach the subscriber
+            time.sleep(0.5)
+            self.executor.spin_once(timeout_sec=0.1)
+
+            # Assert that the result was published to the topic
+            assert len(published_result
+                       ) > 0, "No result published to /reply_action topic"
+            assert published_result[
+                0] == reply, f"Published result '{published_result[0]}' does not match action result '{reply}'"  # noqa: E501
+
+            print(f'Confirmed publication to topic: "{published_result[0]}"')
 
         except Exception as e:
             print(f"Test failed with error: {e}")

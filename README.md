@@ -48,3 +48,7 @@ source install/setup.bash
 ### Action servers
 
 `reply_action_server`: `ReplyActionServer` takes a state and optional instruction and returns the generated response.
+
+### Topics
+
+`/reply_action`: Topic where ReplyAction results are published
