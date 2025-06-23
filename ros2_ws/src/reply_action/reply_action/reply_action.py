@@ -153,7 +153,7 @@ class ReplyActionServer(Node):
         goal = goal_handle.request
         state = goal.state
 
-        if goal.instruction is not None:
+        if len(goal.instruction) > 0:
             self.get_logger().warn('Providing instruction is not implemented')
 
         user_msg = reply_action_pt(state)
