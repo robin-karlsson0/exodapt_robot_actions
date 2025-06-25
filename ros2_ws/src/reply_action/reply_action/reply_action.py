@@ -1,5 +1,8 @@
 import asyncio
+import json
+import os
 import time
+from datetime import datetime
 
 import rclpy
 from exodapt_robot_interfaces.action import ReplyAction
@@ -41,6 +44,10 @@ class ReplyActionServer(Node):
     Attributes:
         action_server_name (str): Name of the action server
         reply_action_topic (str): Topic for publishing ReplyAction results
+        log_pred_io_pth (str): Directory path where LLM prediction
+            (input, output) will be logged as individual JSON files. If empty,
+            no logging will be performed.
+            Ex: 'log/action_reply/'
         client (InferenceClient): Huggingface TGI inference client
         tgi_server_url (str): Configured TGI server URL
         max_tokens (int): Maximum tokens for generation
@@ -69,12 +76,14 @@ class ReplyActionServer(Node):
 
         self.declare_parameter('action_server_name', 'reply_action_server')
         self.declare_parameter('reply_action_topic', '/reply_action')
+        self.declare_parameter('log_pred_io_pth', '')
         self.declare_parameter('tgi_server_url', 'http://localhost:5000')
         self.declare_parameter('max_tokens', 1024)
         self.declare_parameter('llm_temp', 0.6)
         self.declare_parameter('llm_seed', 14)
         self.action_server_name = self.get_parameter(
             'action_server_name').value
+        self.log_pred_io_pth = self.get_parameter('log_pred_io_pth').value
         self.reply_action_topic = self.get_parameter(
             'reply_action_topic').value
         self.tgi_server_url = self.get_parameter('tgi_server_url').value
@@ -99,11 +108,17 @@ class ReplyActionServer(Node):
         base_url = f"{self.tgi_server_url}/v1/"
         self.client = InferenceClient(base_url=base_url)
 
+        # Create log directory
+        if self.log_pred_io_pth:
+            if not os.path.exists(self.log_pred_io_pth):
+                os.makedirs(self.log_pred_io_pth)
+
         self.get_logger().info(
             'ReplyActionServer initialized\n'
             'Parameters:\n'
             f'  action_server_name: {self.action_server_name}\n'
             f'  reply_action_topic: {self.reply_action_topic}\n'
+            f'  log_pred_io_pth: {self.log_pred_io_pth}\n'
             f'  TGI server url: {self.tgi_server_url}\n'
             f'  max_tokens={self.max_tokens}\n'
             f'  llm_temp={self.llm_temp}\n'
@@ -156,7 +171,7 @@ class ReplyActionServer(Node):
         if len(goal.instruction) > 0:
             self.get_logger().warn('Providing instruction is not implemented')
 
-        user_msg = reply_action_pt(state)
+        llm_input = reply_action_pt(state)
 
         t0 = time.time()
 
@@ -165,7 +180,7 @@ class ReplyActionServer(Node):
             messages=[
                 {
                     "role": "user",
-                    "content": user_msg
+                    "content": llm_input
                 },
             ],
             stream=True,
@@ -202,7 +217,62 @@ class ReplyActionServer(Node):
         result_msg_str.data = resp
         self._reply_action_pub.publish(result_msg_str)
 
+        # Write prediction IO example to file
+        if self.log_pred_io_pth:
+            await self.log_pred_io(llm_input, resp, dt)
+
         return result_msg
+
+    async def log_pred_io(self, llm_input: str, llm_output: str, dt: float):
+        """Log LLM prediction input and output to JSON file.
+
+        Creates timestamped JSON files containing the complete prediction
+        context for model evaluation, debugging, and dataset creation. Each
+        log entry includes the prompt, prediction, timing information, and
+        timestamps for comprehensive tracking.
+
+        Args:
+            input (str): The formatted prompt sent to the LLM
+            output (str): The predicted action token returned by the LLM
+            dt (float): Inference duration in seconds
+
+        File Format:
+            JSON files named 'pred_io_{timestamp_ms}.json' containing:
+            - ts: Unix timestamp in milliseconds
+            - iso_ts: ISO format timestamp for human readability
+            - llm_input: Complete LLM prompt string
+            - llm_output: Predicted reply
+            - dt: Inference duration in seconds
+
+        Error Handling:
+            Logging failures are caught and logged as errors without
+            interrupting the action decision process, ensuring system
+            reliability when logging is non-critical.
+
+        Note:
+            Only logs when log_pred_io_pth parameter is configured.
+            Files use UTF-8 encoding with pretty-printed JSON formatting.
+        """
+        try:
+            ts = int(time.time() * 1000)  # millisecond precision
+            file_name = f'pred_io_{ts}.json'
+            file_pth = os.path.join(self.log_pred_io_pth, file_name)
+
+            log_entry = {
+                'ts': ts,
+                'iso_ts': datetime.now().isoformat(),
+                'input': llm_input,
+                'output': llm_output,
+                'dt': dt,
+            }
+
+            with open(file_pth, 'w', encoding='utf-8') as f:
+                json.dump(log_entry, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to log prediction IO example: {e}")
+            return
 
 
 def main(args=None):

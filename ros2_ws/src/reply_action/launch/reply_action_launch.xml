@@ -2,6 +2,7 @@
 <launch>
     <arg name="action_server_name" default="reply_action_server" description="Name of the action server"/>
     <arg name="reply_action_topic" default="/reply_action" description="Topic where reply action results are published"/>
+    <arg name="log_pred_io_pth" default="" description="Directory path where LLM prediction IO (input, output) will be logged as individual JSON files"/>
     <arg name="tgi_server_url" default="http://localhost:8000" description="TGI server URL for LLM inference"/>
     <arg name="max_tokens" default="1" description="Maximum tokens for Action Decision LLM output (single token)"/>
     <arg name="llm_temp" default="0.0" description="Temperature for LLM next-token output distribution"/>
@@ -10,6 +11,7 @@
     <node pkg="reply_action" exec="reply_action" name="reply_action">
         <param name="action_server_name" value="$(var action_server_name)"/>
         <param name="reply_action_topic" value="$(var reply_action_topic)"/>
+        <param name="log_pred_io_pth" value="$(var log_pred_io_pth)"/>
         <param name="tgi_server_url" value="$(var tgi_server_url)"/>
         <param name="max_tokens" value="$(var max_tokens)"/>
         <param name="llm_temp" value="$(var llm_temp)"/>
