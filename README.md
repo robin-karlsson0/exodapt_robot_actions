@@ -7,8 +7,8 @@ Exodapt AI robot actions implemented as ROS 2 action servers.
 Create and source virtual environment
 ```
 # Create virtual environment with uv
-uv venv actions_env
-source decidapt_env/bin/activate
+uv venv actions_env --python 3.12.10
+source actions_env/bin/activate
 
 # Source ROS 2 after activating virtual environment
 source /opt/ros/jazzy/setup.bash
@@ -40,6 +40,13 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
+
+# How to use
+
+```bash
+ros2 launch reply_action reply_action_launch.xml \
+tgi_server_url:='YOUR_IP_ADDR:YOUR_PORT'
+```
 
 # Implemented actions
 
