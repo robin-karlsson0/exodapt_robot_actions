@@ -3,5 +3,5 @@ name = "exodapt-robot-actions"
 version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
-requires-python = "==3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = []

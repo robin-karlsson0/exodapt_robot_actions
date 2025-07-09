@@ -3,7 +3,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = 'reply_action'
+package_name = 'long_dummy_action'
 
 setup(
     name=package_name,
@@ -21,13 +21,13 @@ setup(
     ],
     zip_safe=True,
     maintainer='Robin Karlsson',
-    maintainer_email='robin.karlsson0@gmail.com',
+    maintainer_email='robin@exodapt.ai',
     description='TODO: Package description',
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'reply_action = ' + package_name + '.reply_action:main',
+            'long_dummy_action = ' + package_name + '.long_dummy_action:main',
         ],
     },
 )
