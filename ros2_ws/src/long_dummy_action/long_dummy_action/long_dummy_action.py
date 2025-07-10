@@ -1,10 +1,11 @@
-import asyncio
 import math
 import time
 
 import rclpy
 from exodapt_robot_interfaces.action import LongDummyAction
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 
@@ -23,6 +24,8 @@ class LongDummyActionServer(Node):
     action cancellation, timeout behavior, and client-server interaction
     patterns in ROS 2 systems.
 
+    Ref: https://github.com/ros2/examples/blob/jazzy/rclpy/actions/minimal_action_server/examples_rclpy_minimal_action_server/server.py
+
     Parameters:
         action_server_name (str): Name of the action server
             (default: 'long_dummy_action_server')
@@ -38,7 +41,7 @@ class LongDummyActionServer(Node):
     Attributes:
         action_server_name (str): Name of the action server
         action_duration (int): Duration of the dummy action in seconds
-    """
+    """  # noqa: E501
 
     def __init__(self, **kwargs):
         """
@@ -71,6 +74,9 @@ class LongDummyActionServer(Node):
             LongDummyAction,
             self.action_server_name,
             execute_callback=self.execute_callback,
+            callback_group=ReentrantCallbackGroup(),
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback,
         )
 
         self.get_logger().info(
@@ -78,6 +84,21 @@ class LongDummyActionServer(Node):
             'Parameters:\n'
             f'  action_server_name: {self.action_server_name}\n'
             f'  action_duration: {self.action_duration}')
+
+    def destroy(self):
+        self._action_server.destroy()
+        super().destroy_node()
+
+    def goal_callback(self, goal_request):
+        """Accept or reject a client request to begin an action."""
+        # This server allows multiple goals in parallel
+        self.get_logger().info('Received goal request')
+        return GoalResponse.ACCEPT
+
+    def cancel_callback(self, goal_handle):
+        """Accept or reject a client request to cancel an action."""
+        self.get_logger().info('Received cancel request')
+        return CancelResponse.ACCEPT
 
     async def execute_callback(self, goal_handle):
         """
@@ -111,6 +132,11 @@ class LongDummyActionServer(Node):
         end_time = start_time + self.action_duration
 
         while True:
+
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                self.get_logger().info('Dummy action canceled')
+                return LongDummyAction.Result()
 
             dt = math.ceil(end_time - time.time())
 
@@ -152,11 +178,13 @@ def main(args=None):
     """
     rclpy.init(args=args)
 
-    node = LongDummyActionServer()
+    long_dummy_action_server = LongDummyActionServer()
 
-    asyncio.run(rclpy.spin(node))
+    # Use a MultiThreadedExecutor to enable processing goals concurrently
+    executor = MultiThreadedExecutor()
+    rclpy.spin(long_dummy_action_server, executor=executor)
 
-    node.destroy_node
+    long_dummy_action_server.destroy()
     rclpy.shutdown()
 
 

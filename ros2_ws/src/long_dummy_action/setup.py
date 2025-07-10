@@ -28,6 +28,8 @@ setup(
     entry_points={
         'console_scripts': [
             'long_dummy_action = ' + package_name + '.long_dummy_action:main',
+            'long_dummy_action_client = ' + package_name +
+            '.long_dummy_action_client:main',
         ],
     },
 )
