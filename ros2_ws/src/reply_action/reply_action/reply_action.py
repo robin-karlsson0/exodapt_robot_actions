@@ -117,7 +117,7 @@ class ReplyActionServer(Node):
             if not os.path.exists(self.log_pred_io_pth):
                 os.makedirs(self.log_pred_io_pth)
 
-        self.cancellation_msg = ' ... REPLY GENERATION CANCELLED'
+        self.cancellation_msg = '<REPLY_CANCELLED>'
 
         self.get_logger().info(
             'ReplyActionServer initialized\n'
