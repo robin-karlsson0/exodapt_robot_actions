@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <arg name="action_server_name" default="reply_tts_action_server" description="Name of the action server"/>
+    <arg name="reply_action_server_name" default="reply_action_server" description="Name of the reply action server"/>
+
+    <node pkg="reply_action" exec="reply_tts_action" name="reply_tts_action">
+        <param name="action_server_name" value="$(var action_server_name)"/>
+        <param name="reply_action_server_name" value="$(var reply_action_server_name)"/>
+    </node>
+</launch>
