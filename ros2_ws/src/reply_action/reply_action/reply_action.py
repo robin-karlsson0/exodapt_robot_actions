@@ -117,6 +117,8 @@ class ReplyActionServer(Node):
             if not os.path.exists(self.log_pred_io_pth):
                 os.makedirs(self.log_pred_io_pth)
 
+        self.cancellation_msg = ' ... REPLY GENERATION CANCELLED'
+
         self.get_logger().info(
             'ReplyActionServer initialized\n'
             'Parameters:\n'
@@ -211,14 +213,14 @@ class ReplyActionServer(Node):
 
         streaming_resp_buffer = []
         feedback_msg = ReplyAction.Feedback()
+        was_cancelled = False
 
         for chunk in output:
-
             # Check for cancellation request before processing each chunk
             if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                self.get_logger().info('Reply action canceled')
-                return ReplyAction.Result()
+                was_cancelled = True
+                self.get_logger().info('Reply action cancelled')
+                break
 
             content = chunk.choices[0].delta.content
             streaming_resp_buffer.append(content)
@@ -230,17 +232,23 @@ class ReplyActionServer(Node):
         t1 = time.time()
         dt = t1 - t0
 
-        # Concatenate chunks and send result
+        # Concatenate chunks and prepare result
         resp = ''.join(streaming_resp_buffer)
 
-        goal_handle.succeed()
-        self.get_logger().info(
-            f'ReplyActionServer response: {resp} ({dt:.2f} s)')
+        # Handle cancellation vs completion
+        if was_cancelled:
+            resp += self.cancellation_msg
+            goal_handle.canceled()
+            self.get_logger().info(f'Reply canceled with partial response: '
+                                   f'{resp} ({dt:.2f} s)')
+        else:
+            goal_handle.succeed()
+            self.get_logger().info(f'Reply: {resp} ({dt:.2f} s)')
 
         result_msg = ReplyAction.Result()
         result_msg.reply = resp
 
-        # Publish result
+        # Publish result (even for cancelled actions)
         result_msg_str = String()
         result_msg_str.data = resp
         self._reply_action_pub.publish(result_msg_str)
