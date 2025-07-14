@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import time
@@ -8,7 +7,9 @@ import rclpy
 from exodapt_robot_interfaces.action import ReplyAction
 from exodapt_robot_pt import reply_action_pt
 from huggingface_hub import InferenceClient
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -96,6 +97,9 @@ class ReplyActionServer(Node):
             ReplyAction,
             self.action_server_name,
             execute_callback=self.execute_callback_tgi,
+            callback_group=ReentrantCallbackGroup(),
+            goal_callback=self.goal_callback,
+            cancel_callback=self.cancel_callback,
         )
 
         self._reply_action_pub = self.create_publisher(
@@ -124,6 +128,21 @@ class ReplyActionServer(Node):
             f'  llm_temp={self.llm_temp}\n'
             f'  llm_seed={self.llm_seed}')
 
+    def destroy(self):
+        self._action_server.destroy()
+        super().destroy_node()
+
+    def goal_callback(self, goal_request):
+        """Accept or reject a client request to begin an action."""
+        # This server allows multiple goals in parallel
+        self.get_logger().info('Received goal request')
+        return GoalResponse.ACCEPT
+
+    def cancel_callback(self, goal_handle):
+        """Accept or reject a client request to cancel and action."""
+        self.get_logger().info('Received cancel request')
+        return CancelResponse.ACCEPT
+
     async def execute_callback_tgi(self, goal_handle):
         """
         Execute callback for processing ReplyAction goals using TGI inference.
@@ -137,7 +156,7 @@ class ReplyActionServer(Node):
         The callback handles the full inference pipeline including:
         - Unpacking and validating the goal message
         - Converting robot state to LLM prompt format
-        - Streaming inference with real-time feedback
+        - Streaming inference with real-time feedback and cancellation support
         - Timing inference duration
         - Assembling and returning the final result
 
@@ -160,7 +179,9 @@ class ReplyActionServer(Node):
             The instruction field in the goal is currently not implemented and
             will generate a warning if provided. Response streaming provides
             real-time feedback but may introduce latency depending on model
-            size and server configuration.
+            size and server configuration. The action can be canceled at any
+            point during streaming, allowing immediate termination of ongoing
+            inference.
         """
         self.get_logger().info('Executing ReplyActionServer...')
 
@@ -192,6 +213,13 @@ class ReplyActionServer(Node):
         feedback_msg = ReplyAction.Feedback()
 
         for chunk in output:
+
+            # Check for cancellation request before processing each chunk
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                self.get_logger().info('Reply action canceled')
+                return ReplyAction.Result()
+
             content = chunk.choices[0].delta.content
             streaming_resp_buffer.append(content)
             # Send feedback
@@ -298,11 +326,13 @@ def main(args=None):
     """  # noqa: E501
     rclpy.init(args=args)
 
-    node = ReplyActionServer()
+    reply_action_server = ReplyActionServer()
 
-    asyncio.run(rclpy.spin(node))
+    # Use a MultiThreadedExecutor to enable processing goals concurrently
+    executor = MultiThreadedExecutor()
+    rclpy.spin(reply_action_server, executor=executor)
 
-    node.destroy_node()
+    reply_action_server.destroy()
     rclpy.shutdown()
 
 
