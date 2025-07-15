@@ -1,7 +1,9 @@
+import asyncio
+import os
 import re
 import threading
 import time
-from queue import Empty, Queue
+from queue import Empty, PriorityQueue, Queue
 from typing import Dict, Optional
 
 import azure.cognitiveservices.speech as speechsdk
@@ -165,18 +167,17 @@ class AzureTTSWorker:
             # Start synthesis
             result_future = self._synthesizer.speak_text_async(text)
 
-            # Wait for completion while checking for cancellation
-            while not result_future.done():
-                if cancellation_event.is_set():
-                    # Cancel the synthesis
-                    try:
-                        result_future.cancel()
-                    except Exception:
-                        pass
-                    return False
-                time.sleep(0.1)
+            # Azure Speech SDK's get() method blocks until completion
+            # We can't easily interrupt it, so we check cancellation
+            # before starting and let it complete if already started
+            if cancellation_event.is_set():
+                try:
+                    result_future.cancel()
+                except Exception:
+                    pass
+                return False
 
-            # Get result
+            # Get the result (this blocks until completion)
             result = result_future.get()
 
             completed_reason = speechsdk.ResultReason.SynthesizingAudioCompleted
@@ -418,7 +419,8 @@ class ReplyTTSActionServer(Node):
 
         # Send goal to ReplyActionServer
         reply_action_goal = ReplyAction.Goal()
-        reply_action_goal.state = goal_handle.request.state
+        # reply_action_goal.state = goal_handle.request.state
+        reply_action_goal.state = 'Write a long and exhaustive essay about the history of manking spanning several volumes.'
         reply_action_goal.instruction = goal_handle.request.instruction
 
         try:
@@ -574,7 +576,7 @@ def main(args=None):
 
     Example:
         $ ros2 run your_package reply_action_server
-        $ ros2 run your_package reply_action_server --ros-args -p tgi_server_url:=http://IP_ADDR:PORT
+        $ ros2 run your_package reply_action_server --ros-args -p tgi_server_url:=http://gpu-server:8080
     """  # noqa: E501
     rclpy.init(args=args)
 
