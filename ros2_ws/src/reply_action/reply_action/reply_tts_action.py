@@ -1,5 +1,10 @@
+import re
+import threading
 import time
+from queue import Empty, Queue
+from typing import Dict, Optional
 
+import azure.cognitiveservices.speech as speechsdk
 import rclpy
 from action_msgs.msg import GoalStatus
 from exodapt_robot_interfaces.action import ReplyAction
@@ -8,6 +13,309 @@ from rclpy.action import (ActionClient, ActionServer, CancelResponse,
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+
+
+class SentenceBuffer:
+    """
+    Buffers text chunks and detects sentence boundaries for TTS processing.
+    """
+
+    def __init__(self,
+                 sentence_timeout: float = 3.0,
+                 max_buffer_size: int = 1000):
+        self.chunks = []
+        self.sentence_timeout = sentence_timeout
+        self.max_buffer_size = max_buffer_size
+        self.last_chunk_time = time.time()
+        self._lock = threading.Lock()
+
+        # Sentence ending patterns
+        self.sentence_endings = re.compile(r'[.!?:]\s*$')
+
+    def add_chunk(self, chunk: str) -> Optional[str]:
+        """
+        Add a text chunk and return a complete sentence if detected.
+
+        Returns:
+            Complete sentence if boundary detected, None otherwise
+        """
+        with self._lock:
+            if not chunk.strip():
+                return None
+
+            self.chunks.append(chunk)
+            self.last_chunk_time = time.time()
+
+            # Prevent buffer overflow
+            if len(self.chunks) > self.max_buffer_size:
+                self.chunks = self.chunks[-self.max_buffer_size:]
+
+            current_text = ''.join(self.chunks)
+
+            # Check for sentence ending
+            if self.sentence_endings.search(current_text.strip()):
+                sentence = current_text.strip()
+                self.chunks.clear()
+                return sentence
+
+            return None
+
+    def flush_buffer(self) -> Optional[str]:
+        """
+        Force flush the current buffer as a sentence.
+
+        Returns:
+            Current buffer content as sentence, or None if empty
+        """
+        with self._lock:
+            if not self.chunks:
+                return None
+
+            sentence = ''.join(self.chunks).strip()
+            self.chunks.clear()
+            return sentence if sentence else None
+
+    def should_timeout_flush(self) -> bool:
+        """Check if buffer should be flushed due to timeout."""
+        with self._lock:
+            if not self.chunks:
+                return False
+            elapsed = time.time() - self.last_chunk_time
+            return elapsed > self.sentence_timeout
+
+
+class AzureTTSWorker:
+    """
+    Manages Azure TTS synthesis for text-to-speech conversion.
+    """
+
+    def __init__(
+        self,
+        speech_key: str,
+        speech_endpoint: str,
+        logger,
+        voice_name: str = 'en-US-AvaMultilingualNeural',
+    ):
+        self.speech_key = speech_key
+        self.speech_endpoint = speech_endpoint
+        self.logger = logger
+        self.voice_name = voice_name
+        self._synthesizer = None
+        self._lock = threading.Lock()
+
+        # Initialize Azure TTS
+        self._init_azure_tts()
+
+    def _init_azure_tts(self):
+        """Initialize Azure TTS synthesizer."""
+        try:
+
+            if not self.speech_key or not self.speech_endpoint:
+                self.logger.warn(
+                    'Azure Speech credentials not found in environment. '
+                    'TTS will log sentences without audio synthesis.')
+                return
+
+            # Configure speech synthesis
+            speech_config = speechsdk.SpeechConfig(
+                subscription=self.speech_key,
+                endpoint=self.speech_endpoint,
+            )
+            speech_config.speech_synthesis_voice_name = self.voice_name
+
+            # Use default speaker
+            audio_config = speechsdk.audio.AudioOutputConfig(
+                use_default_speaker=True)
+
+            self._synthesizer = speechsdk.SpeechSynthesizer(
+                speech_config=speech_config,
+                audio_config=audio_config,
+            )
+
+            self.logger.info('Azure TTS synthesizer initialized successfully')
+
+        except Exception as e:
+            self.logger.error(f'Failed to initialize Azure TTS: {str(e)}')
+            self._synthesizer = None
+
+    def synthesize_text(
+        self,
+        text: str,
+        cancellation_event: threading.Event,
+    ) -> bool:
+        """
+        Synthesize text to speech.
+
+        Args:
+            text: Text to synthesize
+            cancellation_event: Event to check for cancellation
+
+        Returns:
+            True if synthesis completed successfully, False otherwise
+        """
+        if cancellation_event.is_set():
+            return False
+
+        # If no synthesizer available, just log the text
+        if not self._synthesizer:
+            self.logger.info(f'TTS (no audio): {text}')
+            return True
+
+        try:
+            # Start synthesis
+            result_future = self._synthesizer.speak_text_async(text)
+
+            # Wait for completion while checking for cancellation
+            while not result_future.done():
+                if cancellation_event.is_set():
+                    # Cancel the synthesis
+                    try:
+                        result_future.cancel()
+                    except Exception:
+                        pass
+                    return False
+                time.sleep(0.1)
+
+            # Get result
+            result = result_future.get()
+
+            completed_reason = speechsdk.ResultReason.SynthesizingAudioCompleted
+            if result.reason == completed_reason:
+                self.logger.info(f'TTS completed: {text[:50]}...')
+                return True
+            elif result.reason == speechsdk.ResultReason.Canceled:
+                if not cancellation_event.is_set():
+                    cancellation_details = result.cancellation_details
+                    self.logger.warn(
+                        f'TTS synthesis canceled: {cancellation_details.reason}'
+                    )
+                    if (cancellation_details.reason ==
+                            speechsdk.CancellationReason.Error):
+                        self.logger.error(
+                            f'TTS error: {cancellation_details.error_details}')
+                return False
+            else:
+                self.logger.error(f'TTS synthesis failed: {result.reason}')
+                return False
+
+        except Exception as e:
+            if not cancellation_event.is_set():
+                self.logger.error(f'TTS synthesis error: {str(e)}')
+            return False
+
+
+class TTSManager:
+    """
+    Manages TTS processing for a single goal, including sentence buffering
+    and synthesis coordination.
+    """
+
+    def __init__(
+        self,
+        goal_uuid: tuple,
+        logger,
+        speech_key: str,
+        speech_endpoint: str,
+    ):
+        self.goal_uuid = goal_uuid
+        self.logger = logger
+        self.speech_key = speech_key
+        self.speech_endpoint = speech_endpoint
+
+        # Components
+        self.sentence_buffer = SentenceBuffer()
+        self.tts_worker = AzureTTSWorker(
+            speech_key,
+            speech_endpoint,
+            logger,
+        )
+
+        # Threading
+        self.cancellation_event = threading.Event()
+        self.synthesis_queue = Queue()
+        self.synthesis_thread = None
+
+        # Start synthesis thread
+        self._start_synthesis_thread()
+
+    def _start_synthesis_thread(self):
+        """Start the background synthesis thread."""
+        self.synthesis_thread = threading.Thread(target=self._synthesis_worker,
+                                                 name=f'TTS-{self.goal_uuid}',
+                                                 daemon=True)
+        self.synthesis_thread.start()
+
+    def _synthesis_worker(self):
+        """Background worker for TTS synthesis."""
+        while not self.cancellation_event.is_set():
+            try:
+                # Get next sentence with timeout
+                sentence = self.synthesis_queue.get(timeout=1.0)
+
+                if sentence is None:  # Shutdown signal
+                    break
+
+                # Synthesize the sentence
+                self.tts_worker.synthesize_text(sentence,
+                                                self.cancellation_event)
+
+                self.synthesis_queue.task_done()
+
+            except Empty:
+                # Check for timeout flush
+                if self.sentence_buffer.should_timeout_flush():
+                    sentence = self.sentence_buffer.flush_buffer()
+                    if sentence:
+                        self.synthesis_queue.put(sentence)
+                continue
+            except Exception as e:
+                self.logger.error(f'TTS synthesis worker error: {str(e)}')
+
+    def process_chunk(self, chunk: str):
+        """
+        Process a text chunk, potentially triggering TTS synthesis.
+
+        Args:
+            chunk: Text chunk to process
+        """
+        if self.cancellation_event.is_set():
+            return
+
+        # Add chunk to buffer and check for complete sentence
+        sentence = self.sentence_buffer.add_chunk(chunk)
+
+        if sentence:
+            # Queue sentence for synthesis
+            try:
+                self.synthesis_queue.put(sentence, timeout=1.0)
+            except Exception as e:
+                self.logger.warn(f'Failed to queue sentence for TTS: {str(e)}')
+
+    def cancel(self):
+        """Cancel TTS processing and cleanup resources."""
+        self.logger.info(f'Canceling TTS manager for goal {self.goal_uuid}')
+
+        # Signal cancellation
+        self.cancellation_event.set()
+
+        # Flush any remaining buffer content
+        remaining_text = self.sentence_buffer.flush_buffer()
+        if remaining_text:
+            self.logger.info(f'TTS (cancelled): {remaining_text}')
+
+        # Clear synthesis queue and add shutdown signal
+        while not self.synthesis_queue.empty():
+            try:
+                self.synthesis_queue.get_nowait()
+                self.synthesis_queue.task_done()
+            except Empty:
+                break
+
+        self.synthesis_queue.put(None)  # Shutdown signal
+
+        # Wait for synthesis thread to finish
+        if self.synthesis_thread and self.synthesis_thread.is_alive():
+            self.synthesis_thread.join(timeout=2.0)
 
 
 class ReplyTTSActionServer(Node):
@@ -25,11 +333,16 @@ class ReplyTTSActionServer(Node):
             'reply_action_server_name',
             'reply_action_server',
         )
+        self.declare_parameter('azure_speech_key', '')
+        self.declare_parameter('azure_speech_endpoint', '')
 
         self.action_server_name = self.get_parameter(
             'action_server_name').value
         self.reply_action_server_name = self.get_parameter(
             'reply_action_server_name').value
+        self.azure_speech_key = self.get_parameter('azure_speech_key').value
+        self.azure_speech_endpoint = self.get_parameter(
+            'azure_speech_endpoint').value
 
         self._action_server = ActionServer(
             self,
@@ -51,13 +364,26 @@ class ReplyTTSActionServer(Node):
         # Maps goal_handle.goal_id.uuid to reply_action_goal_handles
         self.active_goals = {}
 
+        # Maps goal_handle.goal_id.uuid to TTSManager instances
+        self.tts_managers: Dict[tuple, TTSManager] = {}
+
         self.get_logger().info(
             'ReplyTTSActionServer initialized\n'
             'Parameters:\n'
             f'  action_server_name: {self.action_server_name}\n'
-            f'  reply_action_server_name: {self.reply_action_server_name}\n')
+            f'  reply_action_server_name: {self.reply_action_server_name}\n'
+            f'  azure_speech_key: {self.azure_speech_key[:8]}...\n'
+            f'  azure_speech_endpoint: {self.azure_speech_endpoint}')
 
     def destroy(self):
+        """Clean up resources including active TTS managers."""
+        # Cancel all active TTS managers
+        for goal_uuid, tts_manager in self.tts_managers.items():
+            self.get_logger().info(
+                f'Cleaning up TTS manager for goal {goal_uuid}')
+            tts_manager.cancel()
+
+        self.tts_managers.clear()
         self._action_server.destroy()
         super().destroy_node()
 
@@ -92,8 +418,7 @@ class ReplyTTSActionServer(Node):
 
         # Send goal to ReplyActionServer
         reply_action_goal = ReplyAction.Goal()
-        # reply_action_goal.state = goal_handle.request.state
-        reply_action_goal.state = 'Write a long and exhaustive essay about the history of manking spanning several volumes.'
+        reply_action_goal.state = goal_handle.request.state
         reply_action_goal.instruction = goal_handle.request.instruction
 
         try:
@@ -115,6 +440,17 @@ class ReplyTTSActionServer(Node):
             goal_uuid = tuple(goal_handle.goal_id.uuid)
             self.active_goals[goal_uuid] = reply_action_goal_handle
 
+            # Create or get TTS manager for this goal
+            tts_manager = self.tts_managers.get(goal_uuid)
+            if not tts_manager:
+                tts_manager = TTSManager(
+                    goal_uuid,
+                    self.get_logger(),
+                    self.azure_speech_key,
+                    self.azure_speech_endpoint,
+                )
+                self.tts_managers[goal_uuid] = tts_manager
+
             # Check for cancellation request while waiting for goal completion
             result_future = reply_action_goal_handle.get_result_async()
 
@@ -126,7 +462,12 @@ class ReplyTTSActionServer(Node):
                     )
                     await cancel_future
 
-                    # Clean up
+                    # Clean up TTS manager
+                    if goal_uuid in self.tts_managers:
+                        self.tts_managers[goal_uuid].cancel()
+                        del self.tts_managers[goal_uuid]
+
+                    # Clean up goal tracking
                     if goal_uuid in self.active_goals:
                         del self.active_goals[goal_uuid]
 
@@ -134,12 +475,16 @@ class ReplyTTSActionServer(Node):
                     return ReplyAction.Result()
 
                 time.sleep(0.1)
-                # await asyncio.sleep(0.1)
 
             # Get the ReplyActionServer result
             reply_action_result = await result_future
 
-            # Clean up
+            # Clean up TTS manager
+            if goal_uuid in self.tts_managers:
+                self.tts_managers[goal_uuid].cancel()
+                del self.tts_managers[goal_uuid]
+
+            # Clean up goal tracking
             if goal_uuid in self.active_goals:
                 del self.active_goals[goal_uuid]
 
@@ -175,6 +520,13 @@ class ReplyTTSActionServer(Node):
 
             # Clean up
             goal_uuid = tuple(goal_handle.goal_id.uuid)
+
+            # Clean up TTS manager
+            if goal_uuid in self.tts_managers:
+                self.tts_managers[goal_uuid].cancel()
+                del self.tts_managers[goal_uuid]
+
+            # Clean up goal tracking
             if goal_uuid in self.active_goals:
                 del self.active_goals[goal_uuid]
 
@@ -186,9 +538,20 @@ class ReplyTTSActionServer(Node):
         chunk = reply_action_feedback.feedback.streaming_resp
         self.get_logger().info(f'Feedback: {chunk}')
 
+        # Get the TTS manager for this goal
+        goal_uuid = tuple(goal_handle.goal_id.uuid)
+        tts_manager = self.tts_managers.get(goal_uuid)
+
+        if tts_manager:
+            # Process the chunk through TTS
+            tts_manager.process_chunk(chunk)
+        else:
+            self.get_logger().warn(
+                f'No TTS manager found for goal {goal_uuid}')
+
+        # Forward the feedback to clients
         feedback = ReplyAction.Feedback()
         feedback.streaming_resp = chunk
-
         goal_handle.publish_feedback(feedback)
 
 
@@ -211,7 +574,7 @@ def main(args=None):
 
     Example:
         $ ros2 run your_package reply_action_server
-        $ ros2 run your_package reply_action_server --ros-args -p tgi_server_url:=http://gpu-server:8080
+        $ ros2 run your_package reply_action_server --ros-args -p tgi_server_url:=http://IP_ADDR:PORT
     """  # noqa: E501
     rclpy.init(args=args)
 
