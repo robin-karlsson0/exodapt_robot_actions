@@ -1,9 +1,7 @@
-import asyncio
-import os
 import re
 import threading
 import time
-from queue import Empty, PriorityQueue, Queue
+from queue import Empty, Queue
 from typing import Dict, Optional
 
 import azure.cognitiveservices.speech as speechsdk
@@ -32,7 +30,7 @@ class SentenceBuffer:
         self._lock = threading.Lock()
 
         # Sentence ending patterns
-        self.sentence_endings = re.compile(r'[.!?:]\s*$')
+        self.sentence_endings = re.compile(r'[.!?:]')
 
     def add_chunk(self, chunk: str) -> Optional[str]:
         """
@@ -54,11 +52,24 @@ class SentenceBuffer:
 
             current_text = ''.join(self.chunks)
 
-            # Check for sentence ending
-            if self.sentence_endings.search(current_text.strip()):
-                sentence = current_text.strip()
-                self.chunks.clear()
-                return sentence
+            # Look for sentence ending followed by whitespace
+            # Use regex to find all sentence endings
+            matches = list(self.sentence_endings.finditer(current_text))
+
+            if matches:
+                # Check if any sentence ending is followed by whitespace
+                for match in matches:
+                    end_pos = match.end()
+                    # Check if there's whitespace after the sentence ending
+                    if (end_pos < len(current_text)
+                            and current_text[end_pos].isspace()):
+                        # Found complete sentence
+                        sentence = current_text[:end_pos].strip()
+                        remaining = current_text[end_pos:].lstrip()
+
+                        # Update chunks with remaining text
+                        self.chunks = [remaining] if remaining else []
+                        return sentence
 
             return None
 
@@ -272,6 +283,23 @@ class TTSManager:
             except Exception as e:
                 self.logger.error(f'TTS synthesis worker error: {str(e)}')
 
+        # After cancellation, process any remaining items in the queue
+        # This ensures final sentences are still synthesized
+        while not self.synthesis_queue.empty():
+            try:
+                sentence = self.synthesis_queue.get_nowait()
+                if sentence is not None:  # Skip shutdown signal
+                    msg = f'Processing final sentence: {sentence[:50]}...'
+                    self.logger.info(msg)
+                    # Create a new event that's not set for final synthesis
+                    final_event = threading.Event()
+                    self.tts_worker.synthesize_text(sentence, final_event)
+                self.synthesis_queue.task_done()
+            except Empty:
+                break
+            except Exception as e:
+                self.logger.error(f'Error processing final sentence: {str(e)}')
+
     def process_chunk(self, chunk: str):
         """
         Process a text chunk, potentially triggering TTS synthesis.
@@ -296,27 +324,24 @@ class TTSManager:
         """Cancel TTS processing and cleanup resources."""
         self.logger.info(f'Canceling TTS manager for goal {self.goal_uuid}')
 
-        # Signal cancellation
-        self.cancellation_event.set()
-
-        # Flush any remaining buffer content
+        # Flush any remaining buffer content and queue it for synthesis
         remaining_text = self.sentence_buffer.flush_buffer()
         if remaining_text:
-            self.logger.info(f'TTS (cancelled): {remaining_text}')
-
-        # Clear synthesis queue and add shutdown signal
-        while not self.synthesis_queue.empty():
+            self.logger.info(f'Queueing final text: {remaining_text}')
             try:
-                self.synthesis_queue.get_nowait()
-                self.synthesis_queue.task_done()
-            except Empty:
-                break
+                self.synthesis_queue.put(remaining_text, timeout=0.5)
+            except Exception as e:
+                self.logger.warn(f'Failed to queue final text: {str(e)}')
 
-        self.synthesis_queue.put(None)  # Shutdown signal
+        # Signal cancellation - synthesis worker will process remaining queue
+        self.cancellation_event.set()
+
+        # Add shutdown signal
+        self.synthesis_queue.put(None)
 
         # Wait for synthesis thread to finish
         if self.synthesis_thread and self.synthesis_thread.is_alive():
-            self.synthesis_thread.join(timeout=2.0)
+            self.synthesis_thread.join(timeout=3.0)
 
 
 class ReplyTTSActionServer(Node):
@@ -419,8 +444,7 @@ class ReplyTTSActionServer(Node):
 
         # Send goal to ReplyActionServer
         reply_action_goal = ReplyAction.Goal()
-        # reply_action_goal.state = goal_handle.request.state
-        reply_action_goal.state = 'Write a long and exhaustive essay about the history of manking spanning several volumes.'
+        reply_action_goal.state = goal_handle.request.state
         reply_action_goal.instruction = goal_handle.request.instruction
 
         try:

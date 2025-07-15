@@ -14,6 +14,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
+RESULT_KEY = 'reply'
+
 
 class StreamingState(Enum):
     """States for JSON streaming parser."""
@@ -39,7 +41,7 @@ class JSONStreamParser:
         """Reset parser state for a new stream."""
         self.state = StreamingState.WAITING_FOR_JSON_START
         self.buffer = ""
-        self.header_target = '{"reply_text": "'
+        self.header_target = f'{{"{RESULT_KEY}": "'
         self.header_pos = 0
         self.escape_next = False
 
@@ -339,7 +341,7 @@ class ReplyActionServer(Node):
         # Parse reply from output JSON
         try:
             resp_json = json.loads(resp)
-            reply = resp_json['reply_text']
+            reply = resp_json[RESULT_KEY]
             self.get_logger().info(f'Successfully parsed JSON reply: {reply}')
         except json.JSONDecodeError as e:
             self.get_logger().warn(
