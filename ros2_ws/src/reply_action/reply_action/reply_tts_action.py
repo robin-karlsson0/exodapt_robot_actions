@@ -115,6 +115,7 @@ class AzureTTSWorker:
         self.voice_name = voice_name
         self._synthesizer = None
         self._lock = threading.Lock()
+        self._current_synthesis_future = None
 
         # Initialize Azure TTS
         self._init_azure_tts()
@@ -157,7 +158,7 @@ class AzureTTSWorker:
         cancellation_event: threading.Event,
     ) -> bool:
         """
-        Synthesize text to speech.
+        Synthesize text to speech with cancellation support.
 
         Args:
             text: Text to synthesize
@@ -174,22 +175,61 @@ class AzureTTSWorker:
             self.logger.info(f'TTS (no audio): {text}')
             return True
 
+        # Use a threading event to track completion
+        synthesis_complete = threading.Event()
+        synthesis_result = [None]  # Use list to allow modification in callback
+
+        def synthesis_completed_callback(evt):
+            synthesis_result[0] = evt.result
+            synthesis_complete.set()
+
+        def synthesis_canceled_callback(evt):
+            synthesis_result[0] = evt.result
+            synthesis_complete.set()
+
         try:
+            # Connect event handlers
+            synth = self._synthesizer
+            synth.synthesis_completed.connect(synthesis_completed_callback)
+            synth.synthesis_canceled.connect(synthesis_canceled_callback)
+
             # Start synthesis
             result_future = self._synthesizer.speak_text_async(text)
 
-            # Azure Speech SDK's get() method blocks until completion
-            # We can't easily interrupt it, so we check cancellation
-            # before starting and let it complete if already started
-            if cancellation_event.is_set():
-                try:
-                    result_future.cancel()
-                except Exception:
-                    pass
-                return False
+            # Store current synthesis future for potential cancellation
+            with self._lock:
+                self._current_synthesis_future = result_future
 
-            # Get the result (this blocks until completion)
-            result = result_future.get()
+            # Wait for completion or cancellation
+            while not synthesis_complete.is_set():
+                if cancellation_event.is_set():
+                    # Stop synthesis immediately using stop_speaking_async
+                    try:
+                        self._synthesizer.stop_speaking_async()
+                        cancel_msg = (f'TTS synthesis cancelled mid-sentence: '
+                                      f'{text[:50]}...')
+                        self.logger.info(cancel_msg)
+                    except Exception as e:
+                        self.logger.warn(f'Failed to stop TTS: {str(e)}')
+
+                    # Clean up
+                    with self._lock:
+                        self._current_synthesis_future = None
+                    return False
+
+                # Short sleep to avoid busy waiting
+                time.sleep(0.05)  # 50ms polling interval
+
+            # Clean up
+            with self._lock:
+                self._current_synthesis_future = None
+
+            # Process the result
+            result = synthesis_result[0]
+            if result is None:
+                error_msg = 'TTS synthesis completed but no result available'
+                self.logger.error(error_msg)
+                return False
 
             completed_reason = speechsdk.ResultReason.SynthesizingAudioCompleted
             if result.reason == completed_reason:
@@ -211,9 +251,33 @@ class AzureTTSWorker:
                 return False
 
         except Exception as e:
+            # Clean up on exception
+            with self._lock:
+                self._current_synthesis_future = None
+
             if not cancellation_event.is_set():
                 self.logger.error(f'TTS synthesis error: {str(e)}')
             return False
+        finally:
+            # Disconnect event handlers
+            try:
+                synth = self._synthesizer
+                synth.synthesis_completed.disconnect(
+                    synthesis_completed_callback)
+                synth.synthesis_canceled.disconnect(
+                    synthesis_canceled_callback)
+            except Exception:
+                pass
+
+    def stop_current_synthesis(self):
+        """Stop any currently running synthesis immediately."""
+        with self._lock:
+            if self._synthesizer and self._current_synthesis_future:
+                try:
+                    self._synthesizer.stop_speaking_async()
+                    self.logger.info('Stopped current TTS synthesis')
+                except Exception as e:
+                    self.logger.warn(f'Failed to stop current TTS: {str(e)}')
 
 
 class TTSManager:
@@ -246,6 +310,8 @@ class TTSManager:
         self.cancellation_event = threading.Event()
         self.synthesis_queue = Queue()
         self.synthesis_thread = None
+        self.completion_event = threading.Event()
+        self.reply_action_completed = False
 
         # Start synthesis thread
         self._start_synthesis_thread()
@@ -279,26 +345,46 @@ class TTSManager:
                     sentence = self.sentence_buffer.flush_buffer()
                     if sentence:
                         self.synthesis_queue.put(sentence)
+
+                # If reply action is done and no more work, we can complete
+                if (self.reply_action_completed
+                        and self.synthesis_queue.empty()
+                        and not self.sentence_buffer.chunks):
+                    break
                 continue
             except Exception as e:
                 self.logger.error(f'TTS synthesis worker error: {str(e)}')
 
-        # After cancellation, process any remaining items in the queue
-        # This ensures final sentences are still synthesized
-        while not self.synthesis_queue.empty():
-            try:
-                sentence = self.synthesis_queue.get_nowait()
-                if sentence is not None:  # Skip shutdown signal
-                    msg = f'Processing final sentence: {sentence[:50]}...'
-                    self.logger.info(msg)
-                    # Create a new event that's not set for final synthesis
-                    final_event = threading.Event()
-                    self.tts_worker.synthesize_text(sentence, final_event)
-                self.synthesis_queue.task_done()
-            except Empty:
-                break
-            except Exception as e:
-                self.logger.error(f'Error processing final sentence: {str(e)}')
+        # After normal completion (not cancellation), process remaining items
+        # This ensures final sentences are synthesized for normal completion
+        if not self.cancellation_event.is_set():
+            while not self.synthesis_queue.empty():
+                try:
+                    sentence = self.synthesis_queue.get_nowait()
+                    if sentence is not None:  # Skip shutdown signal
+                        msg = f'Processing final sentence: {sentence[:50]}...'
+                        self.logger.info(msg)
+                        # Create a new event that's not set for final synthesis
+                        final_event = threading.Event()
+                        self.tts_worker.synthesize_text(sentence, final_event)
+                    self.synthesis_queue.task_done()
+                except Empty:
+                    break
+                except Exception as e:
+                    error_msg = f'Error processing final sentence: {str(e)}'
+                    self.logger.error(error_msg)
+        else:
+            # If cancelled, just drain the queue without processing
+            self.logger.info('Cancellation requested, skipping remaining TTS')
+            while not self.synthesis_queue.empty():
+                try:
+                    sentence = self.synthesis_queue.get_nowait()
+                    self.synthesis_queue.task_done()
+                except Empty:
+                    break
+
+        # Signal that TTS processing is complete
+        self.completion_event.set()
 
     def process_chunk(self, chunk: str):
         """
@@ -320,9 +406,62 @@ class TTSManager:
             except Exception as e:
                 self.logger.warn(f'Failed to queue sentence for TTS: {str(e)}')
 
+    def mark_reply_action_completed(self):
+        """Mark that the reply action has completed (no more chunks coming)."""
+        self.reply_action_completed = True
+        # Flush any remaining buffer content for normal completion
+        remaining_text = self.sentence_buffer.flush_buffer()
+        if remaining_text:
+            try:
+                self.synthesis_queue.put(remaining_text, timeout=0.5)
+            except Exception as e:
+                self.logger.warn(f'Failed to queue final text: {str(e)}')
+
+    def wait_for_completion(self, timeout: float = None) -> bool:
+        """
+        Wait for TTS processing to complete.
+
+        Args:
+            timeout: Maximum time to wait in seconds. None for no timeout.
+
+        Returns:
+            True if completed within timeout, False if timed out.
+        """
+        return self.completion_event.wait(timeout)
+
+    def cancel_immediately(self):
+        """Cancel TTS processing immediately without finishing queued items."""
+        self.logger.info(
+            f'Immediately canceling TTS manager for goal {self.goal_uuid}')
+
+        # Stop any current synthesis mid-sentence
+        self.tts_worker.stop_current_synthesis()
+
+        # Signal cancellation immediately - do NOT queue any more text
+        self.cancellation_event.set()
+
+        # Clear the synthesis queue to stop processing remaining items
+        while not self.synthesis_queue.empty():
+            try:
+                self.synthesis_queue.get_nowait()
+                self.synthesis_queue.task_done()
+            except Empty:
+                break
+
+        # Add shutdown signal
+        self.synthesis_queue.put(None)
+
+        # Wait for synthesis thread to finish
+        if self.synthesis_thread and self.synthesis_thread.is_alive():
+            self.synthesis_thread.join(timeout=3.0)
+
+        # Ensure completion event is set
+        self.completion_event.set()
+
     def cancel(self):
-        """Cancel TTS processing and cleanup resources."""
-        self.logger.info(f'Canceling TTS manager for goal {self.goal_uuid}')
+        """Cancel TTS processing gracefully, finishing current synthesis."""
+        self.logger.info(
+            f'Gracefully canceling TTS manager for goal {self.goal_uuid}')
 
         # Flush any remaining buffer content and queue it for synthesis
         remaining_text = self.sentence_buffer.flush_buffer()
@@ -342,6 +481,9 @@ class TTSManager:
         # Wait for synthesis thread to finish
         if self.synthesis_thread and self.synthesis_thread.is_alive():
             self.synthesis_thread.join(timeout=3.0)
+
+        # Ensure completion event is set
+        self.completion_event.set()
 
 
 class ReplyTTSActionServer(Node):
@@ -403,11 +545,11 @@ class ReplyTTSActionServer(Node):
 
     def destroy(self):
         """Clean up resources including active TTS managers."""
-        # Cancel all active TTS managers
+        # Cancel all active TTS managers immediately on shutdown
         for goal_uuid, tts_manager in self.tts_managers.items():
             self.get_logger().info(
                 f'Cleaning up TTS manager for goal {goal_uuid}')
-            tts_manager.cancel()
+            tts_manager.cancel_immediately()
 
         self.tts_managers.clear()
         self._action_server.destroy()
@@ -488,9 +630,9 @@ class ReplyTTSActionServer(Node):
                     )
                     await cancel_future
 
-                    # Clean up TTS manager
+                    # Clean up TTS manager immediately (no more TTS)
                     if goal_uuid in self.tts_managers:
-                        self.tts_managers[goal_uuid].cancel()
+                        self.tts_managers[goal_uuid].cancel_immediately()
                         del self.tts_managers[goal_uuid]
 
                     # Clean up goal tracking
@@ -504,6 +646,36 @@ class ReplyTTSActionServer(Node):
 
             # Get the ReplyActionServer result
             reply_action_result = await result_future
+
+            # Mark that the reply action has completed (no more feedback coming)
+            if goal_uuid in self.tts_managers:
+                self.tts_managers[goal_uuid].mark_reply_action_completed()
+
+            # Wait for TTS completion before finishing the action
+            tts_completed = False
+            if goal_uuid in self.tts_managers:
+                self.get_logger().info(
+                    'Waiting for TTS synthesis to complete...')
+                # Wait for TTS with periodic cancellation checks
+                while not tts_completed:
+                    if goal_handle.is_cancel_requested:
+                        self.get_logger().info(
+                            'Canceling during TTS completion wait')
+                        self.tts_managers[goal_uuid].cancel_immediately()
+                        tts_completed = True
+
+                        # Clean up
+                        del self.tts_managers[goal_uuid]
+                        if goal_uuid in self.active_goals:
+                            del self.active_goals[goal_uuid]
+
+                        goal_handle.canceled()
+                        return ReplyAction.Result()
+
+                    # Wait for completion with short timeout for cancellation
+                    tts_manager = self.tts_managers[goal_uuid]
+                    tts_completed = tts_manager.wait_for_completion(
+                        timeout=0.5)
 
             # Clean up TTS manager
             if goal_uuid in self.tts_managers:
@@ -547,9 +719,9 @@ class ReplyTTSActionServer(Node):
             # Clean up
             goal_uuid = tuple(goal_handle.goal_id.uuid)
 
-            # Clean up TTS manager
+            # Clean up TTS manager immediately on error
             if goal_uuid in self.tts_managers:
-                self.tts_managers[goal_uuid].cancel()
+                self.tts_managers[goal_uuid].cancel_immediately()
                 del self.tts_managers[goal_uuid]
 
             # Clean up goal tracking
