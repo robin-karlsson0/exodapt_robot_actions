@@ -2,6 +2,7 @@ import json
 import os
 import time
 from datetime import datetime
+from enum import Enum
 
 import rclpy
 from exodapt_robot_interfaces.action import ReplyAction
@@ -12,6 +13,100 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
+
+RESULT_KEY = 'reply'
+
+
+class StreamingState(Enum):
+    """States for JSON streaming parser."""
+    WAITING_FOR_JSON_START = "waiting_for_json_start"
+    PARSING_JSON_HEADER = "parsing_json_header"
+    STREAMING_CONTENT = "streaming_content"
+    JSON_COMPLETE = "json_complete"
+    FALLBACK_RAW = "fallback_raw"
+
+
+class JSONStreamParser:
+    """Parser for extracting clean content from JSON-formatted LLM streams.
+
+    This parser implements a state machine to detect and extract the content
+    from JSON responses in the format {"reply_text": "actual content"} while
+    streaming, allowing clean feedback without JSON artifacts.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """Reset parser state for a new stream."""
+        self.state = StreamingState.WAITING_FOR_JSON_START
+        self.buffer = ""
+        self.header_target = f'{{"{RESULT_KEY}": "'
+        self.header_pos = 0
+        self.escape_next = False
+
+    def process_chunk(self, chunk: str) -> str:
+        """Process a chunk and return clean content to send as feedback.
+
+        Args:
+            chunk (str): Raw chunk from LLM stream
+
+        Returns:
+            str: Clean content to send as feedback (may be empty)
+        """
+        if not chunk:
+            return ""
+
+        clean_content = ""
+
+        for char in chunk:
+            if self.state == StreamingState.WAITING_FOR_JSON_START:
+                if char == '{':
+                    self.state = StreamingState.PARSING_JSON_HEADER
+                    self.header_pos = 1  # We've seen the '{'
+                elif char.strip():  # Non-whitespace, assume raw text
+                    self.state = StreamingState.FALLBACK_RAW
+                    clean_content += char
+
+            elif self.state == StreamingState.PARSING_JSON_HEADER:
+                if self.header_pos < len(self.header_target):
+                    if char == self.header_target[self.header_pos]:
+                        self.header_pos += 1
+                        if self.header_pos == len(self.header_target):
+                            # Successfully parsed header, start streaming
+                            self.state = StreamingState.STREAMING_CONTENT
+                    else:
+                        # Header doesn't match, fall back to raw streaming
+                        self.state = StreamingState.FALLBACK_RAW
+                        # Add buffered content plus current char
+                        buffered = self.header_target[:self.header_pos]
+                        clean_content += buffered + char
+
+            elif self.state == StreamingState.STREAMING_CONTENT:
+                if self.escape_next:
+                    # Previous char was backslash, this char is escaped
+                    clean_content += char
+                    self.escape_next = False
+                elif char == '\\':
+                    # Escape character, add it and mark next char as escaped
+                    clean_content += char
+                    self.escape_next = True
+                elif char == '"':
+                    # Potential end of content, check if JSON is closing
+                    # For simplicity, assume this ends the content
+                    # (More robust: look ahead for '}')
+                    self.state = StreamingState.JSON_COMPLETE
+                else:
+                    # Regular content character
+                    clean_content += char
+
+            elif self.state == StreamingState.FALLBACK_RAW:
+                # Just pass through everything
+                clean_content += char
+
+            # JSON_COMPLETE state: stop processing
+
+        return clean_content
 
 
 class ReplyActionServer(Node):
@@ -215,6 +310,9 @@ class ReplyActionServer(Node):
         feedback_msg = ReplyAction.Feedback()
         was_cancelled = False
 
+        # JSON parser for clean content extraction
+        json_parser = JSONStreamParser()
+
         for chunk in output:
             # Check for cancellation request before processing each chunk
             if goal_handle.is_cancel_requested:
@@ -222,11 +320,16 @@ class ReplyActionServer(Node):
                 self.get_logger().info('Reply action cancelled')
                 break
 
-            content = chunk.choices[0].delta.content
-            streaming_resp_buffer.append(content)
-            # Send feedback
-            feedback_msg.streaming_resp = content
-            goal_handle.publish_feedback(feedback_msg)
+            raw_content = chunk.choices[0].delta.content
+            streaming_resp_buffer.append(raw_content)
+
+            # Process chunk through JSON parser for clean feedback
+            clean_content = json_parser.process_chunk(raw_content)
+
+            # Send clean feedback (only if there's content to send)
+            if clean_content:
+                feedback_msg.streaming_resp = clean_content
+                goal_handle.publish_feedback(feedback_msg)
 
         # TGI inference time
         t1 = time.time()
@@ -235,27 +338,47 @@ class ReplyActionServer(Node):
         # Concatenate chunks and prepare result
         resp = ''.join(streaming_resp_buffer)
 
+        # Parse reply from output JSON
+        try:
+            resp_json = json.loads(resp)
+            reply = resp_json[RESULT_KEY]
+            self.get_logger().info(f'Successfully parsed JSON reply: {reply}')
+        except json.JSONDecodeError as e:
+            self.get_logger().warn(
+                f'Failed to parse JSON response: {e}. Using raw response.')
+            reply = resp
+        except KeyError as e:
+            self.get_logger().warn(
+                f'Missing expected key in JSON response: {e}. '
+                f'Using raw response.')
+            reply = resp
+        except Exception as e:
+            self.get_logger().warn(
+                f'Unexpected error parsing JSON response: {e}. '
+                f'Using raw response.')
+            reply = resp
+
         # Handle cancellation vs completion
         if was_cancelled:
-            resp += self.cancellation_msg
+            reply += self.cancellation_msg
             goal_handle.canceled()
             self.get_logger().info(f'Reply canceled with partial response: '
-                                   f'{resp} ({dt:.2f} s)')
+                                   f'{reply} ({dt:.2f} s)')
         else:
             goal_handle.succeed()
-            self.get_logger().info(f'Reply: {resp} ({dt:.2f} s)')
+            self.get_logger().info(f'Reply: {reply} ({dt:.2f} s)')
 
         result_msg = ReplyAction.Result()
-        result_msg.reply = resp
+        result_msg.reply = reply
 
         # Publish result (even for cancelled actions)
         result_msg_str = String()
-        result_msg_str.data = resp
+        result_msg_str.data = reply
         self._reply_action_pub.publish(result_msg_str)
 
         # Write prediction IO example to file
         if self.log_pred_io_pth:
-            await self.log_pred_io(llm_input, resp, dt)
+            await self.log_pred_io(llm_input, reply, dt)
 
         return result_msg
 

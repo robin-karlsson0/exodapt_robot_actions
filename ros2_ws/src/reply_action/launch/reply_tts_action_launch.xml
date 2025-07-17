@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+    <arg name="action_server_name" default="reply_tts_action_server" description="Name of the action server"/>
+    <arg name="reply_action_server_name" default="reply_action_server" description="Name of the reply action server"/>
+    <arg name="azure_speech_key" default="" description="Azure Speech Service Key"/>
+    <arg name="azure_speech_endpoint" default="" description="Azure Speech Service Endpoint"/>
+    <arg name="enable_tts_warmup" default="true" description="Enable TTS warmup"/>
+
+    <node pkg="reply_action" exec="reply_tts_action" name="reply_tts_action">
+        <param name="action_server_name" value="$(var action_server_name)"/>
+        <param name="reply_action_server_name" value="$(var reply_action_server_name)"/>
+        <param name="azure_speech_key" value="$(var azure_speech_key)"/>
+        <param name="azure_speech_endpoint" value="$(var azure_speech_endpoint)"/>
+        <param name="enable_tts_warmup" value="$(var enable_tts_warmup)"/>
+    </node>
+</launch>

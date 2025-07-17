@@ -6,4 +6,5 @@ pyyaml
 numpy
 pytest
 transformers
+azure-cognitiveservices-speech
 ros2_ws/src/exodapt_robot_pt

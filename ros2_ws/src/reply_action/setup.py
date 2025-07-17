@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'reply_action = ' + package_name + '.reply_action:main',
+            'reply_tts_action = ' + package_name + '.reply_tts_action:main',
         ],
     },
 )
