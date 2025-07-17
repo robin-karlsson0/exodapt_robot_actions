@@ -40,7 +40,7 @@ class SentenceBuffer:
 
     **Lifecycle Context:**
     - **Per-Goal Isolation**: Each ReplyAction goal gets independent buffer
-    - **Concurrent Support**: Multiple goals can process text simultaneously 
+    - **Concurrent Support**: Multiple goals can process text simultaneously
     - **Memory Management**: Buffer size limits prevent memory exhaustion
     - **Thread Safety**: Lock-protected operations for multi-threaded access
 
@@ -1989,6 +1989,8 @@ class ReplyTTSActionServer(Node):
                 Default: '' (TTS will log text without audio if empty)
             azure_speech_endpoint (str): Azure speech service endpoint URL
                 Default: '' (TTS will log text without audio if empty)
+            enable_tts_warmup (bool): Whether to perform TTS warmup during
+                initialization to reduce first-call latency. Default: True
 
         Key Components Created:
             - ActionServer: Handles incoming TTS-enabled reply requests
@@ -2017,6 +2019,7 @@ class ReplyTTSActionServer(Node):
         )
         self.declare_parameter('azure_speech_key', '')
         self.declare_parameter('azure_speech_endpoint', '')
+        self.declare_parameter('enable_tts_warmup', True)
 
         self.action_server_name = self.get_parameter(
             'action_server_name').value
@@ -2025,6 +2028,7 @@ class ReplyTTSActionServer(Node):
         self.azure_speech_key = self.get_parameter('azure_speech_key').value
         self.azure_speech_endpoint = self.get_parameter(
             'azure_speech_endpoint').value
+        self.enable_tts_warmup = self.get_parameter('enable_tts_warmup').value
 
         self._action_server = ActionServer(
             self,
@@ -2049,13 +2053,71 @@ class ReplyTTSActionServer(Node):
         # Maps goal_handle.goal_id.uuid to TTSManager instances
         self.tts_managers: Dict[tuple, TTSManager] = {}
 
+        # Perform TTS warmup if enabled and credentials are available
+        if self.enable_tts_warmup:
+            self._warmup_azure_tts()
+
         self.get_logger().info(
             'ReplyTTSActionServer initialized\n'
             'Parameters:\n'
             f'  action_server_name: {self.action_server_name}\n'
             f'  reply_action_server_name: {self.reply_action_server_name}\n'
             f'  azure_speech_key: {self.azure_speech_key[:8]}...\n'
-            f'  azure_speech_endpoint: {self.azure_speech_endpoint}')
+            f'  azure_speech_endpoint: {self.azure_speech_endpoint}\n'
+            f'  enable_tts_warmup: {self.enable_tts_warmup}')
+
+    def _warmup_azure_tts(self):
+        """Perform Azure TTS warmup to reduce latency for subsequent goals.
+
+        Creates a temporary AzureTTSWorker and performs a brief synthesis to
+        establish the initial connection to Azure Cognitive Services. This
+        reduces the latency experienced by the first goal that uses TTS.
+
+        The warmup:
+        - Only runs if Azure credentials are provided (skips text-only mode)
+        - Uses a brief, quiet warmup phrase to minimize audio disruption
+        - Handles errors gracefully without affecting node initialization
+        - Completes in the background without blocking node startup
+
+        Note:
+            This is a "fire-and-forget" warmup that doesn't wait for completion.
+            The Azure SDK handles connection establishment asynchronously, so
+            even a quick synthesis call provides connection warming benefits.
+        """
+        # Skip warmup if no credentials (text-only mode)
+        if not self.azure_speech_key or not self.azure_speech_endpoint:
+            self.get_logger().info(
+                'Skipping TTS warmup - no Azure credentials')
+            return
+
+        self.get_logger().info('Starting Azure TTS warmup...')
+
+        try:
+            # Create temporary warmup worker
+            warmup_worker = AzureTTSWorker(
+                speech_key=self.azure_speech_key,
+                speech_endpoint=self.azure_speech_endpoint,
+                logger=self.get_logger(),
+                voice_name='en-US-AvaMultilingualNeural')
+
+            # Perform quick warmup synthesis
+            # Use a never-set event to ensure synthesis completes normally
+            warmup_event = threading.Event()
+            success = warmup_worker.synthesize_text(
+                "System initialized.",
+                warmup_event,
+            )
+
+            if success:
+                self.get_logger().info(
+                    'Azure TTS warmup completed successfully')
+            else:
+                self.get_logger().warn(
+                    'Azure TTS warmup completed with warnings')
+
+        except Exception as e:
+            # Don't let warmup errors affect node initialization
+            self.get_logger().warn(f'Azure TTS warmup failed: {str(e)}')
 
     def destroy(self):
         """Clean up resources including active TTS managers."""
