@@ -10,7 +10,8 @@ from action_msgs.msg import GoalStatus
 from exodapt_robot_interfaces.action import ReplyAction
 from rclpy.action import (ActionClient, ActionServer, CancelResponse,
                           GoalResponse)
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import (MutuallyExclusiveCallbackGroup,
+                                   ReentrantCallbackGroup)
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
@@ -2030,12 +2031,18 @@ class ReplyTTSActionServer(Node):
             'azure_speech_endpoint').value
         self.enable_tts_warmup = self.get_parameter('enable_tts_warmup').value
 
+        # Reentrant group for the server to handle multiple goals at once.
+        self.server_cb_group = ReentrantCallbackGroup()
+
+        # MutuallyExclusive group for processing feedback messages sequentially
+        self.client_cb_group = MutuallyExclusiveCallbackGroup()
+
         self._action_server = ActionServer(
             self,
             ReplyAction,
             self.action_server_name,
             execute_callback=self.execute_callback,
-            callback_group=ReentrantCallbackGroup(),
+            callback_group=self.server_cb_group,
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
         )
@@ -2044,7 +2051,7 @@ class ReplyTTSActionServer(Node):
             self,
             ReplyAction,
             self.reply_action_server_name,
-            callback_group=ReentrantCallbackGroup(),
+            callback_group=self.client_cb_group,
         )
 
         # Maps goal_handle.goal_id.uuid to reply_action_goal_handles
@@ -2469,10 +2476,14 @@ def main(args=None):
 
     # Use a MultiThreadedExecutor to enable processing goals concurrently
     executor = MultiThreadedExecutor()
-    rclpy.spin(reply_tts_action_server, executor=executor)
+    executor.add_node(reply_tts_action_server)
 
-    reply_tts_action_server.destroy()
-    rclpy.shutdown()
+    try:
+        executor.spin()
+    finally:
+        executor.shutdown()
+        reply_tts_action_server.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
