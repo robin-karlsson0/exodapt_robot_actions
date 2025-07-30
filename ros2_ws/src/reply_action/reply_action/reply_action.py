@@ -258,7 +258,7 @@ class ReplyActionServer(Node):
             base_url=f"{self.inference_server_url}/v1",
             api_key="dummy-key"  # vLLM doesn't require a real API key
         )
-        self._vllm_model = self.client.models.list()[0].id
+        self._vllm_model = self.client.models.list().data[0].id
         self.get_logger().info(
             f"Configured vLLM client for: {self.inference_server_url}/v1")
 
