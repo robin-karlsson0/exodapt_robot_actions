@@ -2031,6 +2031,15 @@ class ReplyTTSActionServer(Node):
             'azure_speech_endpoint').value
         self.enable_tts_warmup = self.get_parameter('enable_tts_warmup').value
 
+        self.get_logger().info(
+            'ReplyTTSActionServer initializing\n'
+            'Parameters:\n'
+            f'  action_server_name: {self.action_server_name}\n'
+            f'  reply_action_server_name: {self.reply_action_server_name}\n'
+            f'  azure_speech_key: {self.azure_speech_key[:8]}...\n'
+            f'  azure_speech_endpoint: {self.azure_speech_endpoint}\n'
+            f'  enable_tts_warmup: {self.enable_tts_warmup}')
+
         # Reentrant group for the server to handle multiple goals at once.
         self.server_cb_group = ReentrantCallbackGroup()
 
@@ -2063,15 +2072,6 @@ class ReplyTTSActionServer(Node):
         # Perform TTS warmup if enabled and credentials are available
         if self.enable_tts_warmup:
             self._warmup_azure_tts()
-
-        self.get_logger().info(
-            'ReplyTTSActionServer initialized\n'
-            'Parameters:\n'
-            f'  action_server_name: {self.action_server_name}\n'
-            f'  reply_action_server_name: {self.reply_action_server_name}\n'
-            f'  azure_speech_key: {self.azure_speech_key[:8]}...\n'
-            f'  azure_speech_endpoint: {self.azure_speech_endpoint}\n'
-            f'  enable_tts_warmup: {self.enable_tts_warmup}')
 
     def _warmup_azure_tts(self):
         """Perform Azure TTS warmup to reduce latency for subsequent goals.

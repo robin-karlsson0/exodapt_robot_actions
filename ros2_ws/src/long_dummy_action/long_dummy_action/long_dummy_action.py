@@ -69,6 +69,12 @@ class LongDummyActionServer(Node):
             'action_server_name').value
         self.action_duration = self.get_parameter('action_duration').value
 
+        self.get_logger().info(
+            'LongDummyActionServer initializing\n'
+            'Parameters:\n'
+            f'  action_server_name: {self.action_server_name}\n'
+            f'  action_duration: {self.action_duration}')
+
         self._action_server = ActionServer(
             self,
             LongDummyAction,
@@ -78,12 +84,6 @@ class LongDummyActionServer(Node):
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
         )
-
-        self.get_logger().info(
-            'LongDummyActionServer initialized\n'
-            'Parameters:\n'
-            f'  action_server_name: {self.action_server_name}\n'
-            f'  action_duration: {self.action_duration}')
 
     def destroy(self):
         self._action_server.destroy()

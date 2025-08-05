@@ -192,6 +192,18 @@ class ReplyActionServer(Node):
         self.llm_temp = self.get_parameter('llm_temp').value
         self.llm_seed = self.get_parameter('llm_seed').value
 
+        self.get_logger().info(
+            'ReplyActionServer initializing\n'
+            'Parameters:\n'
+            f'  action_server_name: {self.action_server_name}\n'
+            f'  reply_action_topic: {self.reply_action_topic}\n'
+            f'  log_pred_io_pth: {self.log_pred_io_pth}\n'
+            f'  inference_server_type: {self.inference_server_type}\n'
+            f'  Inference server url: {self.inference_server_url}\n'
+            f'  max_tokens={self.max_tokens}\n'
+            f'  llm_temp={self.llm_temp}\n'
+            f'  llm_seed={self.llm_seed}')
+
         # Configure inference server type and corresponding client/callback
         if self.inference_server_type.lower() == 'tgi':
             self._setup_tgi_client()
@@ -226,18 +238,6 @@ class ReplyActionServer(Node):
                 os.makedirs(self.log_pred_io_pth)
 
         self.cancellation_msg = '<REPLY_CANCELLED>'
-
-        self.get_logger().info(
-            'ReplyActionServer initialized\n'
-            'Parameters:\n'
-            f'  action_server_name: {self.action_server_name}\n'
-            f'  reply_action_topic: {self.reply_action_topic}\n'
-            f'  log_pred_io_pth: {self.log_pred_io_pth}\n'
-            f'  inference_server_type: {self.inference_server_type}\n'
-            f'  Inference server url: {self.inference_server_url}\n'
-            f'  max_tokens={self.max_tokens}\n'
-            f'  llm_temp={self.llm_temp}\n'
-            f'  llm_seed={self.llm_seed}')
 
     def _setup_tgi_client(self):
         """Setup Huggingface InferenceClient for TGI server."""
