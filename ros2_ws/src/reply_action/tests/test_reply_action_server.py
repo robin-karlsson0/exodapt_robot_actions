@@ -708,6 +708,8 @@ class TestReplyActionServerVLLM(BaseReplyActionServerTest):
             model,
             "--max-model-len",
             str(MODEL_MAX_LENGTH),
+            "--gpu_memory_utilization",
+            str(0.85),
         ]
 
         try:

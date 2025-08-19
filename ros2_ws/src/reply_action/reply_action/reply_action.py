@@ -149,7 +149,7 @@ class ReplyActionServer(Node):
         inference_server_url (str): Configured inference server URL
         max_tokens (int): Maximum tokens for generation
         llm_temp (float): Temperature for response sampling
-        llm_seed (int): Seed for deterministic generation
+        llm_seed (int): Seed for deterministic generation (-1 for random seed)
     """  # noqa: E501
 
     def __init__(self, **kwargs):
@@ -178,7 +178,7 @@ class ReplyActionServer(Node):
         self.declare_parameter('inference_server_url', 'http://localhost:8000')
         self.declare_parameter('max_tokens', 1024)
         self.declare_parameter('llm_temp', 0.6)
-        self.declare_parameter('llm_seed', 14)
+        self.declare_parameter('llm_seed', -1)
         self.action_server_name = self.get_parameter(
             'action_server_name').value
         self.log_pred_io_pth = self.get_parameter('log_pred_io_pth').value
@@ -190,7 +190,13 @@ class ReplyActionServer(Node):
             'inference_server_url').value
         self.max_tokens = self.get_parameter('max_tokens').value
         self.llm_temp = self.get_parameter('llm_temp').value
-        self.llm_seed = self.get_parameter('llm_seed').value
+
+        # Handle llm_seed parameter - support multiple ways to specify None
+        llm_seed_param = self.get_parameter('llm_seed').value
+        if llm_seed_param == -1:
+            self.llm_seed = None
+        else:
+            self.llm_seed = int(llm_seed_param)
 
         self.get_logger().info(
             'ReplyActionServer initializing\n'
@@ -458,19 +464,25 @@ class ReplyActionServer(Node):
         t0 = time.time()
 
         # vLLM uses OpenAI-compatible API
-        output = self.client.chat.completions.create(
-            # model="model",  # vLLM uses a generic model name
-            model=self._vllm_model,
-            messages=[
+        # Prepare arguments for chat completion
+        chat_args = {
+            'model': self._vllm_model,
+            'messages': [
                 {
-                    "role": "user",
-                    "content": llm_input
+                    'role': 'user',
+                    'content': llm_input
                 },
             ],
-            stream=True,
-            max_tokens=self.max_tokens,
-            temperature=self.llm_temp,
-            seed=self.llm_seed)
+            'stream': True,
+            'max_tokens': self.max_tokens,
+            'temperature': self.llm_temp,
+        }
+
+        # Only include seed if it's not None
+        if self.llm_seed is not None:
+            chat_args['seed'] = self.llm_seed
+
+        output = self.client.chat.completions.create(**chat_args)
 
         streaming_resp_buffer = []
         feedback_msg = ReplyAction.Feedback()
