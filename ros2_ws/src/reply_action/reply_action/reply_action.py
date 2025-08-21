@@ -546,7 +546,7 @@ class ReplyActionServer(Node):
                                     f'{reply} ({dt:.2f} s)')
         else:
             goal_handle.succeed()
-            self.get_logger().debug(f'Reply: {reply} ({dt:.2f} s)')
+            self.get_logger().info(f'Reply: {reply} ({dt:.2f} s)')
 
         result_msg = ReplyAction.Result()
         result_msg.reply = reply
