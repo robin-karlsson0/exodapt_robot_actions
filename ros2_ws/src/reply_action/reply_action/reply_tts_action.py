@@ -2130,7 +2130,7 @@ class ReplyTTSActionServer(Node):
         """Clean up resources including active TTS managers."""
         # Cancel all active TTS managers immediately on shutdown
         for goal_uuid, tts_manager in self.tts_managers.items():
-            self.get_logger().info(
+            self.get_logger().debug(
                 f'Cleaning up TTS manager for goal {goal_uuid}')
             tts_manager.cancel_immediately()
 
@@ -2141,12 +2141,12 @@ class ReplyTTSActionServer(Node):
     def goal_callback(self, goal_request):
         """Accept or reject a client request to begin an action."""
         # This server allows multiple goals in parallel
-        self.get_logger().info('Received goal request')
+        self.get_logger().debug('Received goal request')
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle):
         """Accept or reject a client request to cancel and action."""
-        self.get_logger().info('Received cancel request')
+        self.get_logger().debug('Received cancel request')
         return CancelResponse.ACCEPT
 
     async def execute_callback(self, goal_handle):
@@ -2248,7 +2248,7 @@ class ReplyTTSActionServer(Node):
             conditions between concurrent goals. TTSManager instances are
             isolated per goal with independent threading and cancellation.
         """
-        self.get_logger().info('Executing ReplyTTSActionServer...')
+        self.get_logger().debug('Executing ReplyTTSActionServer...')
 
         #####################################################
         #  1. Forward goal to underlying ReplyActionServer
@@ -2278,7 +2278,7 @@ class ReplyTTSActionServer(Node):
                 self.get_logger().error('ReplyActionServer rejected goal')
                 goal_handle.abort()
                 return ReplyAction.Result()
-            self.get_logger().info('ReplyActionServer accepted goal')
+            self.get_logger().debug('ReplyActionServer accepted goal')
 
             ##############################
             #  2. Set up TTS processing
@@ -2342,7 +2342,7 @@ class ReplyTTSActionServer(Node):
             # Check for ReplyTTSAction cancel request during ongoing TTS
             tts_completed = False
             if goal_uuid in self.tts_managers:
-                self.get_logger().info(
+                self.get_logger().debug(
                     'Waiting for TTS synthesis to complete...')
                 # Wait for TTS with periodic cancellation checks
                 while not tts_completed:
@@ -2351,7 +2351,7 @@ class ReplyTTSActionServer(Node):
                     #  Scenario 1: Cancel during TTS
                     ###################################
                     if goal_handle.is_cancel_requested:
-                        self.get_logger().info(
+                        self.get_logger().debug(
                             'Canceling during TTS completion wait')
                         self.tts_managers[goal_uuid].cancel_immediately()
                         tts_completed = True
@@ -2383,7 +2383,7 @@ class ReplyTTSActionServer(Node):
             #########################
             if reply_action_result.status == GoalStatus.STATUS_SUCCEEDED:
                 reply = reply_action_result.result.reply
-                self.get_logger().info(
+                self.get_logger().debug(
                     f'ReplyActionServer succeeded with result: {reply}')
 
                 result = ReplyAction.Result()
@@ -2396,7 +2396,7 @@ class ReplyTTSActionServer(Node):
             #  Sceneario 3: Cancel
             #########################
             elif reply_action_result.status == GoalStatus.STATUS_CANCELED:
-                self.get_logger().info('ReplyActionServer was canceled')
+                self.get_logger().debug('ReplyActionServer was canceled')
                 goal_handle.canceled()
                 return ReplyAction.Result()
 
@@ -2405,7 +2405,7 @@ class ReplyTTSActionServer(Node):
             #######################
             else:
                 status = reply_action_result.status
-                self.get_logger().error(
+                self.get_logger().debug(
                     f'ReplyActionServer failed with status: {status}')
                 goal_handle.abort()
                 return ReplyAction.Result()
@@ -2434,7 +2434,7 @@ class ReplyTTSActionServer(Node):
     def _feedback_callback(self, goal_handle, reply_action_feedback):
         """Perform TTS on intermediate feedback from the ReplyActionServer."""
         chunk = reply_action_feedback.feedback.streaming_resp
-        self.get_logger().info(f'Feedback: {chunk}')
+        self.get_logger().debug(f'Feedback: {chunk}')
 
         # Get the TTS manager for this goal
         goal_uuid = tuple(goal_handle.goal_id.uuid)

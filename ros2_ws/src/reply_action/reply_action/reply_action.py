@@ -275,12 +275,12 @@ class ReplyActionServer(Node):
     def goal_callback(self, goal_request):
         """Accept or reject a client request to begin an action."""
         # This server allows multiple goals in parallel
-        self.get_logger().info('Received goal request')
+        self.get_logger().debug('Received goal request')
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle):
         """Accept or reject a client request to cancel and action."""
-        self.get_logger().info('Received cancel request')
+        self.get_logger().debug('Received cancel request')
         return CancelResponse.ACCEPT
 
     async def execute_callback_tgi(self, goal_handle):
@@ -323,7 +323,7 @@ class ReplyActionServer(Node):
             point during streaming, allowing immediate termination of ongoing
             inference.
         """
-        self.get_logger().info('Executing ReplyActionServer...')
+        self.get_logger().debug('Executing ReplyActionServer...')
 
         # Unpack ReplyAction.Goal() msg
         goal = goal_handle.request
@@ -385,7 +385,7 @@ class ReplyActionServer(Node):
         try:
             resp_json = json.loads(resp)
             reply = resp_json[RESULT_KEY]
-            self.get_logger().info(f'Successfully parsed JSON reply: {reply}')
+            self.get_logger().debug(f'Successfully parsed JSON reply: {reply}')
         except json.JSONDecodeError as e:
             self.get_logger().warn(
                 f'Failed to parse JSON response: {e}. Using raw response.')
@@ -405,11 +405,11 @@ class ReplyActionServer(Node):
         if was_cancelled:
             reply += self.cancellation_msg
             goal_handle.canceled()
-            self.get_logger().info(f'Reply canceled with partial response: '
-                                   f'{reply} ({dt:.2f} s)')
+            self.get_logger().debug(f'Reply canceled with partial response: '
+                                    f'{reply} ({dt:.2f} s)')
         else:
             goal_handle.succeed()
-            self.get_logger().info(f'Reply: {reply} ({dt:.2f} s)')
+            self.get_logger().debug(f'Reply: {reply} ({dt:.2f} s)')
 
         result_msg = ReplyAction.Result()
         result_msg.reply = reply
@@ -450,7 +450,7 @@ class ReplyActionServer(Node):
             TimeoutError: If inference exceeds expected duration
             ValueError: If robot state data is invalid or malformed
         """
-        self.get_logger().info('Executing ReplyActionServer with vLLM...')
+        self.get_logger().debug('Executing ReplyActionServer with vLLM...')
 
         # Unpack ReplyAction.Goal() msg
         goal = goal_handle.request
@@ -522,7 +522,7 @@ class ReplyActionServer(Node):
         try:
             resp_json = json.loads(resp)
             reply = resp_json[RESULT_KEY]
-            self.get_logger().info(f'Successfully parsed JSON reply: {reply}')
+            self.get_logger().debug(f'Successfully parsed JSON reply: {reply}')
         except json.JSONDecodeError as e:
             self.get_logger().warn(
                 f'Failed to parse JSON response: {e}. Using raw response.')
@@ -542,11 +542,11 @@ class ReplyActionServer(Node):
         if was_cancelled:
             reply += self.cancellation_msg
             goal_handle.canceled()
-            self.get_logger().info(f'Reply canceled with partial response: '
-                                   f'{reply} ({dt:.2f} s)')
+            self.get_logger().debug(f'Reply canceled with partial response: '
+                                    f'{reply} ({dt:.2f} s)')
         else:
             goal_handle.succeed()
-            self.get_logger().info(f'Reply: {reply} ({dt:.2f} s)')
+            self.get_logger().debug(f'Reply: {reply} ({dt:.2f} s)')
 
         result_msg = ReplyAction.Result()
         result_msg.reply = reply
