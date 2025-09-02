@@ -9,7 +9,7 @@
     <arg name="llm_temp" default="0.6" description="Temperature for LLM next-token output distribution"/>
     <arg name="llm_seed" default="14" description="Seed for reproducible LLM results"/>
 
-    <node pkg="reply_action" exec="reply_action" name="reply_action">
+    <node pkg="reply_action" exec="reply_action" name="reply_action" output="screen" emulate_tty="true">
         <param name="action_server_name" value="$(var action_server_name)"/>
         <param name="reply_action_topic" value="$(var reply_action_topic)"/>
         <param name="log_pred_io_pth" value="$(var log_pred_io_pth)"/>

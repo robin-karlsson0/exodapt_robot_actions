@@ -6,7 +6,7 @@
     <arg name="azure_speech_endpoint" default="" description="Azure Speech Service Endpoint"/>
     <arg name="enable_tts_warmup" default="true" description="Enable TTS warmup"/>
 
-    <node pkg="reply_action" exec="reply_tts_action" name="reply_tts_action">
+    <node pkg="reply_action" exec="reply_tts_action" name="reply_tts_action" output="screen" emulate_tty="true">
         <param name="action_server_name" value="$(var action_server_name)"/>
         <param name="reply_action_server_name" value="$(var reply_action_server_name)"/>
         <param name="azure_speech_key" value="$(var azure_speech_key)"/>
