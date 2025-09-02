@@ -5,6 +5,9 @@
     <arg name="azure_speech_key" default="" description="Azure Speech Service Key"/>
     <arg name="azure_speech_endpoint" default="" description="Azure Speech Service Endpoint"/>
     <arg name="enable_tts_warmup" default="true" description="Enable TTS warmup"/>
+    <arg name="tts_voice_name" default="en-US-AvaMultilingualNeural" description="Azure TTS voice name"/>
+    <arg name="tts_pitch" default="medium" description="TTS pitch setting"/>
+    <arg name="tts_rate" default="medium" description="TTS rate setting"/>
 
     <node pkg="reply_action" exec="reply_tts_action" name="reply_tts_action" output="screen" emulate_tty="true">
         <param name="action_server_name" value="$(var action_server_name)"/>
@@ -12,5 +15,8 @@
         <param name="azure_speech_key" value="$(var azure_speech_key)"/>
         <param name="azure_speech_endpoint" value="$(var azure_speech_endpoint)"/>
         <param name="enable_tts_warmup" value="$(var enable_tts_warmup)"/>
+        <param name="tts_voice_name" value="$(var tts_voice_name)"/>
+        <param name="tts_pitch" value="$(var tts_pitch)"/>
+        <param name="tts_rate" value="$(var tts_rate)"/>
     </node>
 </launch>

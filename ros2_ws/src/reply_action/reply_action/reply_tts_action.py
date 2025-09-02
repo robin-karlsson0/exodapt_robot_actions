@@ -15,6 +15,8 @@ from rclpy.callback_groups import (MutuallyExclusiveCallbackGroup,
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+WARMUP_COMPLETED_MSG = 'TTS system initialized'
+
 
 class SentenceBuffer:
     """Intelligent text chunk buffering and sentence boundary detection
@@ -625,6 +627,8 @@ class AzureTTSWorker:
         speech_endpoint: str,
         logger,
         voice_name: str = 'en-US-AvaMultilingualNeural',
+        pitch: str = 'medium',
+        rate: str = 'medium',
     ):
         """Initialize Azure TTS worker with credentials and configuration.
 
@@ -641,6 +645,10 @@ class AzureTTSWorker:
             voice_name: Azure TTS voice identifier. Defaults to
                 'en-US-AvaMultilingualNeural' for high-quality multilingual
                 speech synthesis.
+            pitch: TTS pitch setting. Options: 'x-low', 'low', 'medium', 
+                'high', 'x-high'. Defaults to 'medium'.
+            rate: TTS rate setting. Options: 'x-slow', 'slow', 'medium',
+                'fast', 'x-fast'. Defaults to 'medium'.
 
         Note:
             If credentials are missing or invalid, the worker operates in
@@ -651,6 +659,8 @@ class AzureTTSWorker:
         self.speech_endpoint = speech_endpoint
         self.logger = logger
         self.voice_name = voice_name
+        self.pitch = pitch
+        self.rate = rate
         self._synthesizer = None
         self._lock = threading.Lock()
         self._current_synthesis_future = None
@@ -775,7 +785,15 @@ class AzureTTSWorker:
             synth.synthesis_canceled.connect(synthesis_canceled_callback)
 
             # Start synthesis
-            result_future = self._synthesizer.speak_text_async(text)
+            # result_future = self._synthesizer.speak_text_async(text)
+            ssml = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+    <voice name="{self.voice_name}">
+        <prosody rate="{self.rate}" pitch="{self.pitch}">
+            {text}
+        </prosody>
+    </voice>
+</speak>"""  # noqa
+            result_future = self._synthesizer.speak_ssml_async(ssml)
 
             # Store current synthesis future for potential cancellation
             with self._lock:
@@ -1097,6 +1115,9 @@ class TTSManager:
         logger,
         speech_key: str,
         speech_endpoint: str,
+        voice_name: str = 'en-US-AvaMultilingualNeural',
+        pitch: str = 'medium',
+        rate: str = 'medium',
     ):
         self.goal_uuid = goal_uuid
         self.logger = logger
@@ -1109,6 +1130,9 @@ class TTSManager:
             speech_key,
             speech_endpoint,
             logger,
+            voice_name=voice_name,
+            pitch=pitch,
+            rate=rate,
         )
 
         # Threading
@@ -2003,6 +2027,10 @@ class ReplyTTSActionServer(Node):
             **kwargs: Additional keyword arguments passed to the ROS 2 Node
                 constructor
 
+            tts_voice_name: Ref: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/language-support?tabs=tts
+            tts_pitch: Ref: https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-synthesis-markup-voice?source=recommendations#adjust-prosody
+            tts_rate:
+
         Raises:
             RuntimeError: If ROS 2 node initialization fails
             Exception: If action server/client setup encounters errors
@@ -2010,7 +2038,7 @@ class ReplyTTSActionServer(Node):
         Note:
             If Azure credentials are not provided, the node will still function
             but will only log TTS text without producing audio output.
-        """
+        """  # noqa
         super().__init__('reply_tts_action', **kwargs)
 
         self.declare_parameter('action_server_name', 'reply_tts_action_server')
@@ -2022,6 +2050,10 @@ class ReplyTTSActionServer(Node):
         self.declare_parameter('azure_speech_endpoint', '')
         self.declare_parameter('enable_tts_warmup', True)
 
+        self.declare_parameter('tts_voice_name', 'en-US-AvaMultilingualNeural')
+        self.declare_parameter('tts_pitch', 'medium')
+        self.declare_parameter('tts_rate', 'medium')
+
         self.action_server_name = self.get_parameter(
             'action_server_name').value
         self.reply_action_server_name = self.get_parameter(
@@ -2031,6 +2063,10 @@ class ReplyTTSActionServer(Node):
             'azure_speech_endpoint').value
         self.enable_tts_warmup = self.get_parameter('enable_tts_warmup').value
 
+        self.tts_voice_name = self.get_parameter('tts_voice_name').value
+        self.tts_pitch = self.get_parameter('tts_pitch').value
+        self.tts_rate = self.get_parameter('tts_rate').value
+
         self.get_logger().info(
             'ReplyTTSActionServer initializing\n'
             'Parameters:\n'
@@ -2038,7 +2074,10 @@ class ReplyTTSActionServer(Node):
             f'  reply_action_server_name: {self.reply_action_server_name}\n'
             f'  azure_speech_key: {self.azure_speech_key[:8]}...\n'
             f'  azure_speech_endpoint: {self.azure_speech_endpoint}\n'
-            f'  enable_tts_warmup: {self.enable_tts_warmup}')
+            f'  enable_tts_warmup: {self.enable_tts_warmup}\n'
+            f'  tts_voice_name: {self.tts_voice_name}\n'
+            f'  tts_pitch: {self.tts_pitch}\n'
+            f'  tts_rate: {self.tts_rate}')
 
         # Reentrant group for the server to handle multiple goals at once.
         self.server_cb_group = ReentrantCallbackGroup()
@@ -2073,6 +2112,21 @@ class ReplyTTSActionServer(Node):
         if self.enable_tts_warmup:
             self._warmup_azure_tts()
 
+    def _get_current_tts_parameters(self):
+        """Get current TTS parameters allowing for runtime updates.
+        
+        This method fetches the current parameter values, enabling dynamic
+        updates during runtime via ROS 2 parameter services without requiring
+        node restart.
+        
+        Returns:
+            tuple: (voice_name, pitch, rate) with current parameter values
+        """
+        voice_name = self.get_parameter('tts_voice_name').value
+        pitch = self.get_parameter('tts_pitch').value
+        rate = self.get_parameter('tts_rate').value
+        return voice_name, pitch, rate
+
     def _warmup_azure_tts(self):
         """Perform Azure TTS warmup to reduce latency for subsequent goals.
 
@@ -2100,18 +2154,23 @@ class ReplyTTSActionServer(Node):
         self.get_logger().info('Starting Azure TTS warmup...')
 
         try:
+            # Get current TTS parameters for warmup
+            voice_name, pitch, rate = self._get_current_tts_parameters()
+
             # Create temporary warmup worker
             warmup_worker = AzureTTSWorker(
                 speech_key=self.azure_speech_key,
                 speech_endpoint=self.azure_speech_endpoint,
                 logger=self.get_logger(),
-                voice_name='en-US-AvaMultilingualNeural')
+                voice_name=voice_name,
+                pitch=pitch,
+                rate=rate)
 
             # Perform quick warmup synthesis
             # Use a never-set event to ensure synthesis completes normally
             warmup_event = threading.Event()
             success = warmup_worker.synthesize_text(
-                "System initialized.",
+                WARMUP_COMPLETED_MSG,
                 warmup_event,
             )
 
@@ -2291,11 +2350,17 @@ class ReplyTTSActionServer(Node):
             # Create or get TTS manager for this goal and store goal handle
             tts_manager = self.tts_managers.get(goal_uuid)
             if not tts_manager:
+                # Get current TTS parameters for this goal
+                voice_name, pitch, rate = self._get_current_tts_parameters()
+
                 tts_manager = TTSManager(
                     goal_uuid,
                     self.get_logger(),
                     self.azure_speech_key,
                     self.azure_speech_endpoint,
+                    voice_name=voice_name,
+                    pitch=pitch,
+                    rate=rate,
                 )
                 self.tts_managers[goal_uuid] = tts_manager
 
