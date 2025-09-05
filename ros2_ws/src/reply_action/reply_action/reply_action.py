@@ -481,6 +481,9 @@ class ReplyActionServer(Node):
                 },
             ],
             'stream': True,
+            'stream_options': {
+                "include_usage": True
+            },
             'max_tokens': self.max_tokens,
             'temperature': self.llm_temp,
         }
@@ -498,12 +501,18 @@ class ReplyActionServer(Node):
         # JSON parser for clean content extraction
         json_parser = JSONStreamParser()
 
+        tokens = -1
         for chunk in output:
             # Check for cancellation request before processing each chunk
             if goal_handle.is_cancel_requested:
                 was_cancelled = True
                 self.get_logger().info('Reply action cancelled')
                 break
+
+            # Check for usage information in the final chunk
+            if hasattr(chunk, 'usage') and chunk.usage is not None:
+                tokens = int(chunk.usage.total_tokens)
+                continue
 
             # vLLM response format is similar to OpenAI
             raw_content = chunk.choices[0].delta.content
@@ -524,7 +533,6 @@ class ReplyActionServer(Node):
 
         # Concatenate chunks and prepare result
         resp = ''.join(streaming_resp_buffer)
-        tokens = int(output.usage.total_tokens)
 
         # Parse reply from output JSON
         try:
