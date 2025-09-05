@@ -704,16 +704,24 @@ class AzureTTSWorker:
             )
             speech_config.speech_synthesis_voice_name = self.voice_name
 
-            # Use default speaker
+            # Optional Azure TTS logging output for debugging
+            # speech_config.set_property(
+            #     speechsdk.PropertyId.Speech_LogFilename,
+            #     AZURE_TTS_LOG_FILE_PTH,
+            # )
+
+            # NOTE Explicitly use PipeWire sound server's pulse audio device to
+            #     avoid TTS crashes due to default device being unavailable
+            #     after approx. 10 min of use.
             audio_config = speechsdk.audio.AudioOutputConfig(
-                use_default_speaker=True)
+                device_name='pulse')
 
             self._synthesizer = speechsdk.SpeechSynthesizer(
                 speech_config=speech_config,
                 audio_config=audio_config,
             )
 
-            self.logger.info('Azure TTS synthesizer initialized successfully')
+            self.logger.debug('Azure TTS synthesizer initialized successfully')
 
         except Exception as e:
             self.logger.error(f'Failed to initialize Azure TTS: {str(e)}')
@@ -2114,11 +2122,11 @@ class ReplyTTSActionServer(Node):
 
     def _get_current_tts_parameters(self):
         """Get current TTS parameters allowing for runtime updates.
-        
+
         This method fetches the current parameter values, enabling dynamic
         updates during runtime via ROS 2 parameter services without requiring
         node restart.
-        
+
         Returns:
             tuple: (voice_name, pitch, rate) with current parameter values
         """

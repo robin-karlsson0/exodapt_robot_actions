@@ -7,7 +7,7 @@ package_name = 'reply_action'
 
 setup(
     name=package_name,
-    version='0.0.1',
+    version='0.1.3',
     packages=find_packages(exclude=['tests']),
     data_files=[
         ('share/ament_index/resource_index/packages',

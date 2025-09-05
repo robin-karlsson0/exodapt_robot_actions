@@ -14,6 +14,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 RESULT_KEY = 'reply'
+THOUGHT_KEY = 'thought'
 
 
 class StreamingState(Enum):
@@ -235,6 +236,12 @@ class ReplyActionServer(Node):
         self._reply_action_pub = self.create_publisher(
             String,
             self.reply_action_topic,
+            10,
+        )
+
+        self._reply_thought_pub = self.create_publisher(
+            String,
+            self.reply_action_topic + '_thought',
             10,
         )
 
@@ -517,12 +524,17 @@ class ReplyActionServer(Node):
 
         # Concatenate chunks and prepare result
         resp = ''.join(streaming_resp_buffer)
+        tokens = int(output.usage.total_tokens)
 
         # Parse reply from output JSON
         try:
             resp_json = json.loads(resp)
             reply = resp_json[RESULT_KEY]
-            self.get_logger().debug(f'Successfully parsed JSON reply: {reply}')
+            thought = resp_json[THOUGHT_KEY]
+
+            self.get_logger().debug(
+                f'Successfully parsed JSON\n  reply: {reply}\n  thought: {thought}'  # noqa
+            )
         except json.JSONDecodeError as e:
             self.get_logger().warn(
                 f'Failed to parse JSON response: {e}. Using raw response.')
@@ -537,6 +549,7 @@ class ReplyActionServer(Node):
                 f'Unexpected error parsing JSON response: {e}. '
                 f'Using raw response.')
             reply = resp
+            thought = ''
 
         # Handle cancellation vs completion
         if was_cancelled:
@@ -546,7 +559,11 @@ class ReplyActionServer(Node):
                                     f'{reply} ({dt:.2f} s)')
         else:
             goal_handle.succeed()
-            self.get_logger().info(f'Reply: {reply} ({dt:.2f} s)')
+            tokens_str = await self.format_number(tokens)
+            self.get_logger().info(
+                f'Reply: {reply} ({dt:.2f} s, {tokens_str} tokens)')
+            self.get_logger().info(
+                f'Thought: {thought} ({dt:.2f} s, {tokens_str} tokens)')
 
         result_msg = ReplyAction.Result()
         result_msg.reply = reply
@@ -556,9 +573,13 @@ class ReplyActionServer(Node):
         result_msg_str.data = reply
         self._reply_action_pub.publish(result_msg_str)
 
+        thought_msg = String()
+        thought_msg.data = thought
+        self._reply_thought_pub.publish(thought_msg)
+
         # Write prediction IO example to file
         if self.log_pred_io_pth:
-            await self.log_pred_io(llm_input, reply, dt)
+            await self.log_pred_io(llm_input, resp, dt)
 
         return result_msg
 
@@ -612,6 +633,39 @@ class ReplyActionServer(Node):
             self.get_logger().error(
                 f"Failed to log prediction IO example: {e}")
             return
+
+    @staticmethod
+    async def format_number(num: int, decimals: int = 2) -> str:
+        """
+        Format an integer with appropriate quantity suffixes (K, M, B, T).
+
+        Args:
+            num (int): The number to format
+            decimals (int): Number of decimals to display
+
+        NOTE The underscore `_` in integer literals is a digit separator for
+            readability.
+
+        Returns:
+            str: Formatted string with 1 decimal place and suffix
+        """
+        if num < 1000:
+            return str(num)
+
+        # Define the suffixes and their corresponding divisors
+        suffixes = [
+            (1_000_000_000_000, 'T'),  # Trillion
+            (1_000_000_000, 'B'),  # Billion
+            (1_000_000, 'M'),  # Million
+            (1_000, 'K')  # Thousand
+        ]
+
+        for divisor, suffix in suffixes:
+            if num >= divisor:
+                result = num / divisor
+                return f"{result:.{decimals}f}{suffix}"
+
+        return str(num)
 
 
 def main(args=None):
