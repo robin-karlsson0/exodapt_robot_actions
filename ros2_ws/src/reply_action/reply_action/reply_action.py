@@ -486,6 +486,11 @@ class ReplyActionServer(Node):
             },
             'max_tokens': self.max_tokens,
             'temperature': self.llm_temp,
+            'extra_body': {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
         }
 
         # Only include seed if it's not None
