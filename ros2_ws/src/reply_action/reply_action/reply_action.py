@@ -13,6 +13,10 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
 
+BLUE = '\033[94m'
+YELLOW = '\033[93m'
+RESET = '\033[0m'
+
 RESULT_KEY = 'reply'
 THOUGHT_KEY = 'thought'
 
@@ -175,7 +179,7 @@ class ReplyActionServer(Node):
         self.declare_parameter('action_server_name', 'reply_action_server')
         self.declare_parameter('reply_action_topic', '/reply_action')
         self.declare_parameter('log_pred_io_pth', '')
-        self.declare_parameter('inference_server_type', 'tgi')
+        self.declare_parameter('inference_server_type', 'vllm')
         self.declare_parameter('inference_server_url', 'http://localhost:8000')
         self.declare_parameter('max_tokens', 1024)
         self.declare_parameter('llm_temp', 0.6)
@@ -212,16 +216,13 @@ class ReplyActionServer(Node):
             f'  llm_seed={self.llm_seed}')
 
         # Configure inference server type and corresponding client/callback
-        if self.inference_server_type.lower() == 'tgi':
-            self._setup_tgi_client()
-            self.execute_callback = self.execute_callback_tgi
-        elif self.inference_server_type.lower() == 'vllm':
+        if self.inference_server_type.lower() == 'vllm':
             self._setup_vllm_client()
             self.execute_callback = self.execute_callback_vllm
         else:
-            raise ValueError(f"Unsupported inference_server_type: "
+            raise ValueError("Unsupported inference_server_type: "
                              f"{self.inference_server_type}. "
-                             f"Supported types: 'tgi', 'vllm'")
+                             "Supported types: 'vllm'")
 
         self._action_server = ActionServer(
             self,
@@ -289,148 +290,6 @@ class ReplyActionServer(Node):
         """Accept or reject a client request to cancel and action."""
         self.get_logger().debug('Received cancel request')
         return CancelResponse.ACCEPT
-
-    async def execute_callback_tgi(self, goal_handle):
-        """
-        Execute callback for processing ReplyAction goals using TGI inference.
-
-        This async callback processes incoming action goals containing robot
-        state information, formats the state data into a prompt using the
-        reply_action_pt function, and queries the TGI server for response
-        generation. The method streams response chunks as feedback and returns
-        the complete reply.
-
-        The callback handles the full inference pipeline including:
-        - Unpacking and validating the goal message
-        - Converting robot state to LLM prompt format
-        - Streaming inference with real-time feedback and cancellation support
-        - Timing inference duration
-        - Assembling and returning the final result
-
-        Args:
-            goal_handle (ServerGoalHandle): ROS 2 action goal handle containing:
-                - request.state: Robot state information for context
-                - request.instruction: Optional instruction (not currently
-                  implemented)
-
-        Returns:
-            ReplyAction.Result: Action result containing:
-                - reply (str): Complete generated response text
-
-        Raises:
-            ConnectionError: If TGI server is unreachable during inference
-            TimeoutError: If inference exceeds expected duration
-            ValueError: If robot state data is invalid or malformed
-
-        Note:
-            The instruction field in the goal is currently not implemented and
-            will generate a warning if provided. Response streaming provides
-            real-time feedback but may introduce latency depending on model
-            size and server configuration. The action can be canceled at any
-            point during streaming, allowing immediate termination of ongoing
-            inference.
-        """
-        self.get_logger().debug('Executing ReplyActionServer...')
-
-        # Unpack ReplyAction.Goal() msg
-        goal = goal_handle.request
-        state = goal.state
-
-        if len(goal.instruction) > 0:
-            self.get_logger().warn('Providing instruction is not implemented')
-
-        llm_input = reply_action_pt(state)
-
-        t0 = time.time()
-
-        output = self.client.chat.completions.create(
-            model="tgi",
-            messages=[
-                {
-                    "role": "user",
-                    "content": llm_input
-                },
-            ],
-            stream=True,
-            max_tokens=self.max_tokens,
-            temperature=self.llm_temp,
-            seed=self.llm_seed)
-
-        streaming_resp_buffer = []
-        feedback_msg = ReplyAction.Feedback()
-        was_cancelled = False
-
-        # JSON parser for clean content extraction
-        json_parser = JSONStreamParser()
-
-        for chunk in output:
-            # Check for cancellation request before processing each chunk
-            if goal_handle.is_cancel_requested:
-                was_cancelled = True
-                self.get_logger().info('Reply action cancelled')
-                break
-
-            raw_content = chunk.choices[0].delta.content
-            streaming_resp_buffer.append(raw_content)
-
-            # Process chunk through JSON parser for clean feedback
-            clean_content = json_parser.process_chunk(raw_content)
-
-            # Send clean feedback (only if there's content to send)
-            if clean_content:
-                feedback_msg.streaming_resp = clean_content
-                goal_handle.publish_feedback(feedback_msg)
-
-        # Inference time
-        t1 = time.time()
-        dt = t1 - t0
-
-        # Concatenate chunks and prepare result
-        resp = ''.join(streaming_resp_buffer)
-
-        # Parse reply from output JSON
-        try:
-            resp_json = json.loads(resp)
-            reply = resp_json[RESULT_KEY]
-            self.get_logger().debug(f'Successfully parsed JSON reply: {reply}')
-        except json.JSONDecodeError as e:
-            self.get_logger().warn(
-                f'Failed to parse JSON response: {e}. Using raw response.')
-            reply = resp
-        except KeyError as e:
-            self.get_logger().warn(
-                f'Missing expected key in JSON response: {e}. '
-                f'Using raw response.')
-            reply = resp
-        except Exception as e:
-            self.get_logger().warn(
-                f'Unexpected error parsing JSON response: {e}. '
-                f'Using raw response.')
-            reply = resp
-
-        # Handle cancellation vs completion
-        if was_cancelled:
-            reply += self.cancellation_msg
-            goal_handle.canceled()
-            self.get_logger().debug(f'Reply canceled with partial response: '
-                                    f'{reply} ({dt:.2f} s)')
-        else:
-            goal_handle.succeed()
-            self.get_logger().debug(f'Reply: {reply} ({dt:.2f} s)')
-
-        result_msg = ReplyAction.Result()
-        result_msg.reply = reply
-
-        # Publish result (even for cancelled actions)
-        result_msg_str = String()
-        result_msg_str.data = reply
-        self._reply_action_pub.publish(result_msg_str)
-
-        # Write prediction IO example to file
-        if self.log_pred_io_pth:
-            await self.log_pred_io(llm_input, reply, dt)
-
-        return result_msg
 
     async def execute_callback_vllm(self, goal_handle):
         """
@@ -552,11 +411,13 @@ class ReplyActionServer(Node):
             self.get_logger().warn(
                 f'Failed to parse JSON response: {e}. Using raw response.')
             reply = resp
+            thought = ''
         except KeyError as e:
             self.get_logger().warn(
                 f'Missing expected key in JSON response: {e}. '
                 f'Using raw response.')
             reply = resp
+            thought = ''
         except Exception as e:
             self.get_logger().warn(
                 f'Unexpected error parsing JSON response: {e}. '
@@ -567,6 +428,7 @@ class ReplyActionServer(Node):
         # Handle cancellation vs completion
         if was_cancelled:
             reply += self.cancellation_msg
+            thought = ''
             goal_handle.canceled()
             self.get_logger().debug(f'Reply canceled with partial response: '
                                     f'{reply} ({dt:.2f} s)')
@@ -574,9 +436,11 @@ class ReplyActionServer(Node):
             goal_handle.succeed()
             tokens_str = await self.format_number(tokens)
             self.get_logger().info(
-                f'Reply: {reply} ({dt:.2f} s, {tokens_str} tokens)')
+                f'{YELLOW}Reply: {reply} ({dt:.2f} s, {tokens_str} tokens){RESET}'  # noqa
+            )
             self.get_logger().info(
-                f'Thought: {thought} ({dt:.2f} s, {tokens_str} tokens)')
+                f'{BLUE}Thought: {thought} ({dt:.2f} s, {tokens_str} tokens){RESET}'  # noqa
+            )
 
         result_msg = ReplyAction.Result()
         result_msg.reply = reply
@@ -586,8 +450,12 @@ class ReplyActionServer(Node):
         result_msg_str.data = reply
         self._reply_action_pub.publish(result_msg_str)
 
+        # Ensure publishing order
+        time.sleep(0.01)
+
+        # Publish thoughts
         thought_msg = String()
-        thought_msg.data = thought
+        thought_msg.data = f"Robot's thoughts about the robot reply: {thought}"
         self._reply_thought_pub.publish(thought_msg)
 
         # Write prediction IO example to file

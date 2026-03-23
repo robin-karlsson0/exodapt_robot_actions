@@ -7,7 +7,7 @@ package_name = 'reply_action'
 
 setup(
     name=package_name,
-    version='0.1.3',
+    version='0.2.0',
     packages=find_packages(exclude=['tests']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'reply_action = ' + package_name + '.reply_action:main',
+            'reply_action_2 = ' + package_name + '.reply_action_2:main',
             'reply_tts_action = ' + package_name + '.reply_tts_action:main',
         ],
     },
