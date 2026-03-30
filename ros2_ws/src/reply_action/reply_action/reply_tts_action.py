@@ -1,3 +1,4 @@
+import json
 import re
 import threading
 import time
@@ -270,8 +271,51 @@ class SentenceBuffer:
         self.last_chunk_time = time.time()
         self._lock = threading.Lock()
 
-        # Sentence ending patterns
+        # Sentence ending pattern and whitespace-check flag (language-specific)
+        # Default: Western punctuation (.!?:) followed by whitespace
         self.sentence_endings = re.compile(r'[.!?:]')
+        self.requires_whitespace = True
+
+    # Language-specific sentence boundary patterns.
+    # Keys match the lang_code values produced by the LLM.
+    # requires_whitespace=False for languages that don't use spaces between
+    # sentences (CJK, Arabic), so boundaries fire at the punctuation mark
+    # itself rather than waiting for the next whitespace character.
+    _LANGUAGE_PATTERNS: dict = {
+        # Western / Latin-script languages — whitespace required
+        'en': (re.compile(r'[.!?:]'), True),
+        'fr': (re.compile(r'[.!?:]'), True),
+        'de': (re.compile(r'[.!?:]'), True),
+        'es': (re.compile(r'[.!?:]'), True),
+        'pt': (re.compile(r'[.!?:]'), True),
+        'it': (re.compile(r'[.!?:]'), True),
+        'nl': (re.compile(r'[.!?:]'), True),
+        'ru': (re.compile(r'[.!?:]'), True),
+        # CJK and Arabic — no inter-sentence whitespace
+        'jp': (re.compile(r'[。！？；\n]'), False),
+        'zh': (re.compile(r'[。！？；\n]'), False),
+        'ko': (re.compile(r'[。！？；\n]'), False),
+        'ar': (re.compile(r'[؟؛،\n]'), False),
+    }
+
+    def set_language_pattern(self, lang_code: str) -> None:
+        """Switch sentence boundary detection to match the given language.
+
+        Looks up lang_code in _LANGUAGE_PATTERNS and updates
+        self.sentence_endings and self.requires_whitespace accordingly.
+        Falls back to the Western-punctuation default for unknown codes.
+
+        Thread Safety:
+            Protected by internal lock; safe to call from any thread.
+
+        Args:
+            lang_code: Language code matching LLM output (e.g. 'en', 'jp').
+        """
+        with self._lock:
+            pattern, requires_ws = self._LANGUAGE_PATTERNS.get(
+                lang_code, (re.compile(r'[.!?:]'), True))
+            self.sentence_endings = pattern
+            self.requires_whitespace = requires_ws
 
     def add_chunk(self, chunk: str) -> Optional[str]:
         """Add streaming text chunk and detect complete sentence boundaries.
@@ -333,19 +377,20 @@ class SentenceBuffer:
             matches = list(self.sentence_endings.finditer(current_text))
 
             if matches:
-                # Check if any sentence ending is followed by whitespace
                 for match in matches:
                     end_pos = match.end()
-                    # Check if there's whitespace after the sentence ending
-                    if (end_pos < len(current_text)
-                            and current_text[end_pos].isspace()):
-                        # Found complete sentence
-                        sentence = current_text[:end_pos].strip()
-                        remaining = current_text[end_pos:].lstrip()
-
-                        # Update chunks with remaining text
-                        self.chunks = [remaining] if remaining else []
-                        return sentence
+                    # For languages requiring whitespace after punctuation,
+                    # confirm the next character is a space before splitting.
+                    # For CJK/Arabic the punctuation mark alone is sufficient.
+                    if self.requires_whitespace:
+                        if not (end_pos < len(current_text)
+                                and current_text[end_pos].isspace()):
+                            continue
+                    # Found a complete sentence boundary
+                    sentence = current_text[:end_pos].strip()
+                    remaining = current_text[end_pos:].lstrip()
+                    self.chunks = [remaining] if remaining else []
+                    return sentence
 
             return None
 
@@ -645,7 +690,7 @@ class AzureTTSWorker:
             voice_name: Azure TTS voice identifier. Defaults to
                 'en-US-AvaMultilingualNeural' for high-quality multilingual
                 speech synthesis.
-            pitch: TTS pitch setting. Options: 'x-low', 'low', 'medium', 
+            pitch: TTS pitch setting. Options: 'x-low', 'low', 'medium',
                 'high', 'x-high'. Defaults to 'medium'.
             rate: TTS rate setting. Options: 'x-slow', 'slow', 'medium',
                 'fast', 'x-fast'. Defaults to 'medium'.
@@ -911,6 +956,28 @@ class AzureTTSWorker:
                 except Exception as e:
                     self.logger.warn(f'Failed to stop current TTS: {str(e)}')
 
+    def set_voice(self, voice_name: str) -> None:
+        """Switch the TTS voice and reinitialise the Azure synthesizer.
+
+        Recreates the underlying SpeechSynthesizer with the new voice.
+        Should be called before synthesis begins (i.e. on the first
+        lang_code feedback chunk) so the overhead is not perceivable.
+
+        Thread Safety:
+            Protected by the internal lock; safe to call from any thread.
+
+        Args:
+            voice_name: Azure TTS voice identifier
+                (e.g. 'ja-JP-NanamisNeural').
+        """
+        with self._lock:
+            if self.voice_name == voice_name:
+                return
+            self.voice_name = voice_name
+        # Re-init outside the lock to avoid holding it during network I/O
+        self.logger.info(f'Switching TTS voice to: {voice_name}')
+        self._init_azure_tts()
+
 
 class TTSManager:
     """
@@ -1143,6 +1210,12 @@ class TTSManager:
             rate=rate,
         )
 
+        # Language configuration
+        # Mapping of lang_code -> Azure voice name for per-language voice
+        # selection. Populated from the voice_overrides ROS 2 parameter.
+        self.lang_voice_map: Dict[str, str] = {}
+        self.current_lang_code: str = ''
+
         # Threading
         self.cancellation_event = threading.Event()
         self.synthesis_queue = Queue()
@@ -1152,6 +1225,36 @@ class TTSManager:
 
         # Start synthesis thread
         self._start_synthesis_thread()
+
+    def configure_language(self, lang_code: str) -> None:
+        """Apply language-specific sentence pattern and TTS voice.
+
+        Idempotent: subsequent calls with the same lang_code are no-ops.
+        Called from ReplyTTSActionServer._feedback_callback() on every
+        non-empty feedback chunk; the first call with a non-empty code
+        triggers the one-time reconfiguration.
+
+        Args:
+            lang_code: Language code from feedback (e.g. 'en', 'jp').
+                Empty string is ignored.
+        """
+        if not lang_code or lang_code == self.current_lang_code:
+            return
+
+        self.current_lang_code = lang_code
+        self.logger.info(f'Configuring TTS for language: {lang_code}')
+
+        # Switch sentence boundary detection pattern
+        self.sentence_buffer.set_language_pattern(lang_code)
+
+        # Switch voice if an override is configured for this language
+        voice = self.lang_voice_map.get(lang_code)
+        if voice:
+            self.tts_worker.set_voice(voice)
+        else:
+            self.logger.debug(
+                f'No voice override for lang_code "{lang_code}"; '
+                'keeping current voice')
 
     def _start_synthesis_thread(self):
         """Initialize and start background synthesis thread for TTS processing.
@@ -2061,6 +2164,12 @@ class ReplyTTSActionServer(Node):
         self.declare_parameter('tts_voice_name', 'en-US-AvaMultilingualNeural')
         self.declare_parameter('tts_pitch', 'medium')
         self.declare_parameter('tts_rate', 'medium')
+        # JSON-encoded dict mapping lang_code -> Azure voice name.
+        # Example: '{"en": "en-US-AvaMultilingualNeural",
+        #            "jp": "ja-JP-NanamisNeural"}'
+        # Keys must match the lang_code values the LLM produces.
+        # Unknown lang_codes keep the current (default) voice.
+        self.declare_parameter('tts_voice_overrides', '{}')
 
         self.action_server_name = self.get_parameter(
             'action_server_name').value
@@ -2075,6 +2184,17 @@ class ReplyTTSActionServer(Node):
         self.tts_pitch = self.get_parameter('tts_pitch').value
         self.tts_rate = self.get_parameter('tts_rate').value
 
+        _voice_overrides_raw = self.get_parameter('tts_voice_overrides').value
+        try:
+            self.tts_voice_overrides: Dict[str, str] = json.loads(
+                _voice_overrides_raw)
+            if not isinstance(self.tts_voice_overrides, dict):
+                raise ValueError('tts_voice_overrides must be a JSON object')
+        except Exception as e:
+            self.get_logger().warn(
+                f'Failed to parse tts_voice_overrides, using empty map: {e}')
+            self.tts_voice_overrides = {}
+
         self.get_logger().info(
             'ReplyTTSActionServer initializing\n'
             'Parameters:\n'
@@ -2085,7 +2205,8 @@ class ReplyTTSActionServer(Node):
             f'  enable_tts_warmup: {self.enable_tts_warmup}\n'
             f'  tts_voice_name: {self.tts_voice_name}\n'
             f'  tts_pitch: {self.tts_pitch}\n'
-            f'  tts_rate: {self.tts_rate}')
+            f'  tts_rate: {self.tts_rate}\n'
+            f'  tts_voice_overrides: {self.tts_voice_overrides}')
 
         # Reentrant group for the server to handle multiple goals at once.
         self.server_cb_group = ReentrantCallbackGroup()
@@ -2370,6 +2491,7 @@ class ReplyTTSActionServer(Node):
                     pitch=pitch,
                     rate=rate,
                 )
+                tts_manager.lang_voice_map = self.tts_voice_overrides
                 self.tts_managers[goal_uuid] = tts_manager
 
             #################################################################
@@ -2506,23 +2628,29 @@ class ReplyTTSActionServer(Node):
 
     def _feedback_callback(self, goal_handle, reply_action_feedback):
         """Perform TTS on intermediate feedback from the ReplyActionServer."""
-        chunk = reply_action_feedback.feedback.streaming_resp
-        self.get_logger().debug(f'Feedback: {chunk}')
+        fb = reply_action_feedback.feedback
+        chunk = fb.streaming_resp
+        lang_code = fb.lang_code
+        self.get_logger().debug(f'Feedback [{lang_code}]: {chunk}')
 
         # Get the TTS manager for this goal
         goal_uuid = tuple(goal_handle.goal_id.uuid)
         tts_manager = self.tts_managers.get(goal_uuid)
 
         if tts_manager:
+            # Apply language-specific voice/pattern on first non-empty code
+            if lang_code:
+                tts_manager.configure_language(lang_code)
             # Process the chunk through TTS
             tts_manager.process_chunk(chunk)
         else:
             self.get_logger().warn(
                 f'No TTS manager found for goal {goal_uuid}')
 
-        # Forward the feedback to clients
+        # Forward the feedback to clients unchanged
         feedback = ReplyAction.Feedback()
         feedback.streaming_resp = chunk
+        feedback.lang_code = lang_code
         goal_handle.publish_feedback(feedback)
 
 

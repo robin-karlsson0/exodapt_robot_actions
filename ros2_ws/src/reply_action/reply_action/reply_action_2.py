@@ -19,12 +19,16 @@ RESET = '\033[0m'
 
 RESULT_KEY = 'reply'
 THOUGHT_KEY = 'thought'
+LANG_CODE_KEY = 'lang_code'
 
 
 class StreamingState(Enum):
     """States for JSON streaming parser."""
     WAITING_FOR_JSON_START = "waiting_for_json_start"
-    PARSING_JSON_HEADER = "parsing_json_header"
+    PARSING_LANG_CODE_KEY = "parsing_lang_code_key"
+    CAPTURING_LANG_CODE = "capturing_lang_code"
+    PARSING_REPLY_KEY = "parsing_reply_key"
+    PARSING_JSON_HEADER = "parsing_json_header"  # legacy fallback path
     STREAMING_CONTENT = "streaming_content"
     JSON_COMPLETE = "json_complete"
     FALLBACK_RAW = "fallback_raw"
@@ -34,8 +38,9 @@ class JSONStreamParser:
     """Parser for extracting clean content from JSON-formatted LLM streams.
 
     This parser implements a state machine to detect and extract the content
-    from JSON responses in the format {"reply_text": "actual content"} while
-    streaming, allowing clean feedback without JSON artifacts.
+    from JSON responses in the format
+    {"lang_code": "code", "reply_text": "actual content"} while streaming,
+    allowing clean feedback without JSON artifacts.
     """
 
     def __init__(self):
@@ -45,18 +50,35 @@ class JSONStreamParser:
         """Reset parser state for a new stream."""
         self.state = StreamingState.WAITING_FOR_JSON_START
         self.buffer = ""
-        self.header_target = f'{{"{RESULT_KEY}": "'
+        # Legacy single-key header target (fallback path)
+        self.header_target = '{' + f'"{RESULT_KEY}": "'
         self.header_pos = 0
         self.escape_next = False
+        # Two-field header targets
+        self._lang_key_target = f'"{LANG_CODE_KEY}": "'
+        self._lang_key_pos = 0
+        self._reply_key_target = f', "{RESULT_KEY}": "'
+        self._reply_key_pos = 0
+        # Detected language code (populated during streaming)
+        self.detected_lang_code: str = ''
 
     def process_chunk(self, chunk: str) -> str:
         """Process a chunk and return clean content to send as feedback.
+
+        Handles two JSON formats:
+
+        Two-field (multilingual):
+            {"lang_code": "en", "reply": "Hello world!"}
+        Single-field (legacy fallback):
+            {"reply": "Hello world!"}
 
         Args:
             chunk (str): Raw chunk from LLM stream
 
         Returns:
-            str: Clean content to send as feedback (may be empty)
+            str: Clean reply content to send as feedback (may be empty).
+                 Side-effect: populates self.detected_lang_code once the
+                 lang_code value is fully captured.
         """
         if not chunk:
             return ""
@@ -64,51 +86,121 @@ class JSONStreamParser:
         clean_content = ""
 
         for char in chunk:
+            # ----------------------------------------------------------------
+            # State: WAITING_FOR_JSON_START
+            # ----------------------------------------------------------------
             if self.state == StreamingState.WAITING_FOR_JSON_START:
                 if char == '{':
-                    self.state = StreamingState.PARSING_JSON_HEADER
-                    self.header_pos = 1  # We've seen the '{'
-                elif char.strip():  # Non-whitespace, assume raw text
+                    # Try the two-field path first (lang_code before reply)
+                    self.state = StreamingState.PARSING_LANG_CODE_KEY
+                    self._lang_key_pos = 0
+                elif char.strip():  # Non-whitespace outside JSON → raw text
                     self.state = StreamingState.FALLBACK_RAW
                     clean_content += char
 
+            # ----------------------------------------------------------------
+            # State: PARSING_LANG_CODE_KEY  — matching '"lang_code": "'
+            # ----------------------------------------------------------------
+            elif self.state == StreamingState.PARSING_LANG_CODE_KEY:
+                expected = self._lang_key_target[self._lang_key_pos]
+                if char == expected:
+                    self._lang_key_pos += 1
+                    if self._lang_key_pos == len(self._lang_key_target):
+                        # Full lang_code key matched → start capturing value
+                        self.state = StreamingState.CAPTURING_LANG_CODE
+                else:
+                    # Mismatch — this might be the legacy single-key format.
+                    # Replay as if we are in PARSING_JSON_HEADER from pos 1.
+                    self.state = StreamingState.PARSING_JSON_HEADER
+                    self.header_pos = 1
+                    # Feed the already-seen chars plus the failing char into
+                    # the legacy path by reconstructing what was consumed.
+                    # The buffered prefix was self._lang_key_target[:self._lang_key_pos]  # noqa
+                    # followed by `char`.  Delegate to legacy handler.
+                    reconstructed = self._lang_key_target[:self.
+                                                          _lang_key_pos] + char
+                    for rc in reconstructed:
+                        if self.state != StreamingState.PARSING_JSON_HEADER:
+                            break
+                        if self.header_pos < len(self.header_target):
+                            if rc == self.header_target[self.header_pos]:
+                                self.header_pos += 1
+                                if self.header_pos == len(self.header_target):
+                                    self.state = StreamingState.STREAMING_CONTENT  # noqa
+                            else:
+                                self.state = StreamingState.FALLBACK_RAW
+                                buffered = self.header_target[:self.header_pos]
+                                clean_content += buffered + rc
+
+            # ----------------------------------------------------------------
+            # State: CAPTURING_LANG_CODE  — chars until unescaped '"'
+            # ----------------------------------------------------------------
+            elif self.state == StreamingState.CAPTURING_LANG_CODE:
+                if self.escape_next:
+                    self.detected_lang_code += char
+                    self.escape_next = False
+                elif char == '\\':
+                    self.escape_next = True
+                elif char == '"':
+                    # End of lang_code value → now look for the reply key
+                    self.state = StreamingState.PARSING_REPLY_KEY
+                    self._reply_key_pos = 0
+                else:
+                    self.detected_lang_code += char
+
+            # ----------------------------------------------------------------
+            # State: PARSING_REPLY_KEY  — matching ', "reply": "'
+            # ----------------------------------------------------------------
+            elif self.state == StreamingState.PARSING_REPLY_KEY:
+                expected = self._reply_key_target[self._reply_key_pos]
+                if char == expected:
+                    self._reply_key_pos += 1
+                    if self._reply_key_pos == len(self._reply_key_target):
+                        # Full reply key matched → stream content
+                        self.state = StreamingState.STREAMING_CONTENT
+                        self.escape_next = False
+                else:
+                    # Unexpected char after lang_code — fall back to raw
+                    self.state = StreamingState.FALLBACK_RAW
+                    buffered = self._reply_key_target[:self._reply_key_pos]
+                    clean_content += buffered + char
+
+            # ----------------------------------------------------------------
+            # State: PARSING_JSON_HEADER  — legacy single-key path
+            # ----------------------------------------------------------------
             elif self.state == StreamingState.PARSING_JSON_HEADER:
                 if self.header_pos < len(self.header_target):
                     if char == self.header_target[self.header_pos]:
                         self.header_pos += 1
                         if self.header_pos == len(self.header_target):
-                            # Successfully parsed header, start streaming
                             self.state = StreamingState.STREAMING_CONTENT
                     else:
-                        # Header doesn't match, fall back to raw streaming
                         self.state = StreamingState.FALLBACK_RAW
-                        # Add buffered content plus current char
                         buffered = self.header_target[:self.header_pos]
                         clean_content += buffered + char
 
+            # ----------------------------------------------------------------
+            # State: STREAMING_CONTENT  — emit reply chars
+            # ----------------------------------------------------------------
             elif self.state == StreamingState.STREAMING_CONTENT:
                 if self.escape_next:
-                    # Previous char was backslash, this char is escaped
                     clean_content += char
                     self.escape_next = False
                 elif char == '\\':
-                    # Escape character, add it and mark next char as escaped
                     clean_content += char
                     self.escape_next = True
                 elif char == '"':
-                    # Potential end of content, check if JSON is closing
-                    # For simplicity, assume this ends the content
-                    # (More robust: look ahead for '}')
                     self.state = StreamingState.JSON_COMPLETE
                 else:
-                    # Regular content character
                     clean_content += char
 
+            # ----------------------------------------------------------------
+            # State: FALLBACK_RAW  — pass everything through
+            # ----------------------------------------------------------------
             elif self.state == StreamingState.FALLBACK_RAW:
-                # Just pass through everything
                 clean_content += char
 
-            # JSON_COMPLETE state: stop processing
+            # JSON_COMPLETE: stop processing
 
         return clean_content
 
@@ -324,7 +416,8 @@ class ReplyActionServer2(Node):
             asr_metadata = state_dict.get('metadata', {})
             full_state_str = pre + chunks + dyn
         except json.JSONDecodeError:
-            self.get_logger().warn("ReplyActionServer received invalid JSON state")  # noqa
+            self.get_logger().warn(
+                "ReplyActionServer received invalid JSON state")  # noqa
             # Fallback to assuming the state is purely plain text
             full_state_str = state_json
             asr_metadata = {}
@@ -401,6 +494,7 @@ class ReplyActionServer2(Node):
                 # Send clean feedback (only if there's content to send)
                 if clean_content:
                     feedback_msg.streaming_resp = clean_content
+                    feedback_msg.lang_code = json_parser.detected_lang_code
                     goal_handle.publish_feedback(feedback_msg)
 
         # Inference time
