@@ -1242,7 +1242,7 @@ class TTSManager:
             return
 
         self.current_lang_code = lang_code
-        self.logger.info(f'Configuring TTS for language: {lang_code}')
+        self.logger.debug(f'Configuring TTS for language: {lang_code}')
 
         # Switch sentence boundary detection pattern
         self.sentence_buffer.set_language_pattern(lang_code)
