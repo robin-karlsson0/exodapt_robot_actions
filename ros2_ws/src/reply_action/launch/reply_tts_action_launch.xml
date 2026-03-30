@@ -5,7 +5,7 @@
     <arg name="azure_speech_key" default="" description="Azure Speech Service Key"/>
     <arg name="azure_speech_endpoint" default="" description="Azure Speech Service Endpoint"/>
     <arg name="enable_tts_warmup" default="true" description="Enable TTS warmup"/>
-    <arg name="tts_voice_name" default="en-US-AvaMultilingualNeural" description="Azure TTS voice name"/>
+    <arg name="tts_voice_name" default="en-US-AmandaMultilingualNeural" description="Azure TTS voice name"/>
     <arg name="tts_pitch" default="medium" description="TTS pitch setting"/>
     <arg name="tts_rate" default="medium" description="TTS rate setting"/>
 

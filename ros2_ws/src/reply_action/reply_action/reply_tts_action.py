@@ -2161,11 +2161,12 @@ class ReplyTTSActionServer(Node):
         self.declare_parameter('azure_speech_endpoint', '')
         self.declare_parameter('enable_tts_warmup', True)
 
-        self.declare_parameter('tts_voice_name', 'en-US-AvaMultilingualNeural')
+        self.declare_parameter('tts_voice_name',
+                               'en-US-AmandaMultilingualNeural')
         self.declare_parameter('tts_pitch', 'medium')
         self.declare_parameter('tts_rate', 'medium')
         # JSON-encoded dict mapping lang_code -> Azure voice name.
-        # Example: '{"en": "en-US-AvaMultilingualNeural",
+        # Example: '{"en": "en-US-AmandaMultilingualNeural",
         #            "jp": "ja-JP-NanamisNeural"}'
         # Keys must match the lang_code values the LLM produces.
         # Unknown lang_codes keep the current (default) voice.
